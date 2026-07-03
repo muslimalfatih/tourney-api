@@ -1,0 +1,385 @@
+openapi: 3.1.0
+info:
+  title: Laga API
+  version: 0.1.0
+  description: >
+    White-label tennis tournament platform API. This spec is the canonical
+    contract between laga-api and laga-web. Frontend types are generated from
+    it; backend responses are validated against it.
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development
+
+tags:
+  - name: auth
+  - name: public
+  - name: tournaments
+  - name: events
+  - name: matches
+  - name: admin
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Authenticate and receive tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      access_token: { type: string }
+                      refresh_token: { type: string }
+                      user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Exchange a refresh token for a new token pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: Refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      access_token: { type: string }
+                      refresh_token: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Log out (stateless; clears client session)
+      responses:
+        "204": { description: Logged out }
+
+  /me:
+    get:
+      tags: [auth]
+      summary: Current authenticated user
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /public/tournaments/{slug}:
+    get:
+      tags: [public]
+      summary: Public tournament by slug
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Slug"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PublicTournament" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /public/events/{id}/bracket:
+    get:
+      tags: [public]
+      summary: Bracket tree for an event (consumed by the custom renderer)
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Bracket" }
+
+  /public/matches/{id}:
+    get:
+      tags: [public]
+      summary: Public match detail
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Match" }
+
+  /public/tournaments/{slug}/stream:
+    get:
+      tags: [public]
+      summary: SSE stream of live tournament updates
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Slug"
+      responses:
+        "200":
+          description: text/event-stream of events (match.score, match.status)
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /tournaments:
+    get:
+      tags: [tournaments]
+      summary: List tournaments (organizer scope)
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Tournament" }
+                  meta: { $ref: "#/components/schemas/Meta" }
+    post:
+      tags: [tournaments]
+      summary: Create a tournament
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug, sport]
+              properties:
+                name: { type: string }
+                slug: { type: string }
+                sport: { type: string, enum: [tennis] }
+                location: { type: string }
+                branding: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Tournament" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /tournaments/{id}/publish:
+    post:
+      tags: [tournaments]
+      summary: Publish a tournament (make public pages visible)
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Tournament" }
+
+  /matches/{id}/score:
+    patch:
+      tags: [matches]
+      summary: Update a match score (publishes an SSE event)
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sets:
+                  type: array
+                  items: { $ref: "#/components/schemas/SetScore" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Match" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  security:
+    - bearerAuth: []
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Slug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, default: 1, minimum: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    Meta:
+      type: object
+      properties:
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [super_admin, organizer] }
+        org_id: { type: [string, "null"], format: uuid }
+    Tournament:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        sport: { type: string }
+        status: { type: string, enum: [draft, published, archived, suspended] }
+    PublicTournament:
+      allOf:
+        - $ref: "#/components/schemas/Tournament"
+        - type: object
+          properties:
+            branding: { type: object, additionalProperties: true }
+            events:
+              type: array
+              items: { $ref: "#/components/schemas/Event" }
+    Event:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        discipline: { type: string, enum: [singles, doubles] }
+        format: { type: string, enum: [single_elim, round_robin, group_knockout] }
+    Bracket:
+      type: object
+      properties:
+        event_id: { type: string, format: uuid }
+        format: { type: string }
+        rounds:
+          type: array
+          items:
+            type: object
+            properties:
+              round_number: { type: integer }
+              name: { type: string }
+              matches:
+                type: array
+                items: { $ref: "#/components/schemas/Match" }
+    Match:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, scheduled, live, completed, walkover, bye] }
+        court: { type: [string, "null"] }
+        scheduled_at: { type: [string, "null"], format: date-time }
+        participants:
+          type: array
+          items: { $ref: "#/components/schemas/MatchParticipant" }
+        sets:
+          type: array
+          items: { $ref: "#/components/schemas/SetScore" }
+        winner_participant_id: { type: [string, "null"], format: uuid }
+    MatchParticipant:
+      type: object
+      properties:
+        slot: { type: integer, enum: [1, 2] }
+        participant_id: { type: [string, "null"], format: uuid }
+        display_name: { type: [string, "null"] }
+        seed: { type: [integer, "null"] }
+    SetScore:
+      type: object
+      properties:
+        set_number: { type: integer }
+        p1_games: { type: integer }
+        p2_games: { type: integer }
+        p1_tiebreak: { type: [integer, "null"] }
+        p2_tiebreak: { type: [integer, "null"] }
