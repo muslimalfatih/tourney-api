@@ -6,6 +6,7 @@ package draw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -87,13 +88,15 @@ func (s *Service) Generate(ctx context.Context, eventID uuid.UUID, orgID *uuid.U
 		entries[i] = Entry{ParticipantID: p.id, Seed: seed}
 	}
 
-	// Pick the generator by format. Group→knockout is not wired yet.
+	// Pick the generator by format.
 	var matches []Match
 	switch format {
 	case "single_elim":
 		matches = GenerateSingleElimination(entries)
 	case "round_robin":
 		matches = GenerateRoundRobin(entries)
+	case "group_knockout":
+		matches = GenerateGroupKnockout(entries, defaultGroupConfig(len(entries)))
 	default:
 		return 0, ErrUnsupportedForm
 	}
@@ -104,9 +107,24 @@ func (s *Service) Generate(ctx context.Context, eventID uuid.UUID, orgID *uuid.U
 	return len(matches), s.persist(ctx, eventID, matches)
 }
 
+// defaultGroupConfig picks a sensible groups/advance split from the entry
+// count: groups of ~4, top 2 advance, giving a power-of-two knockout.
+func defaultGroupConfig(n int) GroupKnockoutConfig {
+	groups := 2
+	switch {
+	case n >= 16:
+		groups = 4
+	case n >= 8:
+		groups = 2
+	}
+	return GroupKnockoutConfig{Groups: groups, Advance: 2}
+}
+
 // persist writes the generated matches and their progression + slot entries in
 // a single transaction. It maps the generator's flat indices to DB uuids, then
-// wires next_match_id in a second pass.
+// wires next_match_id in a second pass. When any match carries a GroupIndex >= 0
+// (group-knockout), it also creates a group stage + group rows and a knockout
+// stage, stamping matches.stage_id / group_id.
 func (s *Service) persist(ctx context.Context, eventID uuid.UUID, matches []Match) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -114,31 +132,81 @@ func (s *Service) persist(ctx context.Context, eventID uuid.UUID, matches []Matc
 	}
 	defer tx.Rollback(ctx)
 
-	// Fresh draw: clear any existing matches for this event.
+	// Fresh draw: clear existing matches AND stages for this event.
 	if _, err := tx.Exec(ctx, `DELETE FROM matches WHERE event_id = $1`, eventID); err != nil {
 		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM stages WHERE event_id = $1`, eventID); err != nil {
+		return err
+	}
+
+	// Detect group-knockout (any match with GroupIndex >= 0) and prepare
+	// stage/group ids up front.
+	hasGroups := false
+	maxGroup := -1
+	for _, m := range matches {
+		if m.GroupIndex >= 0 {
+			hasGroups = true
+			if m.GroupIndex > maxGroup {
+				maxGroup = m.GroupIndex
+			}
+		}
+	}
+
+	var groupStageID, knockoutStageID uuid.UUID
+	groupIDs := map[int]uuid.UUID{}
+	if hasGroups {
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO stages (event_id, kind, sort_order) VALUES ($1,'group',0) RETURNING id`,
+			eventID).Scan(&groupStageID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO stages (event_id, kind, sort_order) VALUES ($1,'knockout',1) RETURNING id`,
+			eventID).Scan(&knockoutStageID); err != nil {
+			return err
+		}
+		for g := 0; g <= maxGroup; g++ {
+			name := "Group " + string(rune('A'+g))
+			var gid uuid.UUID
+			if err := tx.QueryRow(ctx,
+				`INSERT INTO groups (stage_id, name) VALUES ($1,$2) RETURNING id`,
+				groupStageID, name).Scan(&gid); err != nil {
+				return err
+			}
+			groupIDs[g] = gid
+		}
 	}
 
 	ids := make([]uuid.UUID, len(matches))
 
-	// Pass 1: insert matches, capturing generated ids. Bye/known slots set the
-	// match status accordingly.
+	// Pass 1: insert matches, capturing ids + stage/group assignment.
 	for i, m := range matches {
 		status := "pending"
 		if m.Slot1.IsBye || m.Slot2.IsBye {
 			status = "bye"
 		}
+		var stageID, groupID *uuid.UUID
+		if hasGroups {
+			if m.GroupIndex >= 0 {
+				stageID = &groupStageID
+				gid := groupIDs[m.GroupIndex]
+				groupID = &gid
+			} else {
+				stageID = &knockoutStageID
+			}
+		}
 		var id uuid.UUID
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO matches (event_id, match_no, status)
-			VALUES ($1, $2, $3::match_status)
-			RETURNING id`, eventID, i+1, status).Scan(&id); err != nil {
+			INSERT INTO matches (event_id, stage_id, group_id, match_no, status)
+			VALUES ($1, $2, $3, $4, $5::match_status)
+			RETURNING id`, eventID, stageID, groupID, i+1, status).Scan(&id); err != nil {
 			return fmt.Errorf("insert match %d: %w", i, err)
 		}
 		ids[i] = id
 	}
 
-	// Pass 2: wire progression + slot participants.
+	// Pass 2: wire progression + slot participants (or source labels).
 	for i, m := range matches {
 		if m.NextMatchIdx >= 0 {
 			if _, err := tx.Exec(ctx,
@@ -165,6 +233,9 @@ type BracketSlot struct {
 	ParticipantID *uuid.UUID `json:"participant_id"`
 	DisplayName   *string    `json:"display_name"`
 	Seed          *int       `json:"seed"`
+	// SourceLabel is a placeholder like "Winner Group A" for unresolved
+	// group-knockout feeds (nil once a participant is assigned).
+	SourceLabel *string `json:"source_label"`
 }
 
 // BracketSet is one set's games for both sides, for compact score display.
@@ -406,14 +477,336 @@ func (s *Service) GetStandings(ctx context.Context, eventID uuid.UUID) ([]Standi
 	return out, rows.Err()
 }
 
+// ResolveGroups fills the knockout placeholders (Winner/Runner-up Group X) with
+// the actual group finishers, once the group stage is complete. It is
+// idempotent: re-running re-resolves from current standings. Returns the number
+// of slots filled. Authorization is the caller's responsibility.
+func (s *Service) ResolveGroups(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID) (int, error) {
+	// Authorize via the event's tournament org.
+	var ownerOrg uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		SELECT t.org_id FROM events e JOIN tournaments t ON t.id = e.tournament_id WHERE e.id = $1`,
+		eventID).Scan(&ownerOrg)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if orgID != nil && ownerOrg != *orgID {
+		return 0, ErrForbidden
+	}
+
+	// Build a map: label ("Winner Group A") → participant id, from standings.
+	grows, err := s.pool.Query(ctx, `
+		SELECT g.id, g.name
+		FROM groups g JOIN stages st ON st.id = g.stage_id
+		WHERE st.event_id = $1 AND st.kind = 'group'`, eventID)
+	if err != nil {
+		return 0, err
+	}
+	type grp struct {
+		id   uuid.UUID
+		name string
+	}
+	var groups []grp
+	for grows.Next() {
+		var g grp
+		if err := grows.Scan(&g.id, &g.name); err != nil {
+			grows.Close()
+			return 0, err
+		}
+		groups = append(groups, g)
+	}
+	grows.Close()
+
+	labelToPID := map[string]uuid.UUID{}
+	for _, g := range groups {
+		st, err := s.standingsForGroup(ctx, g.id)
+		if err != nil {
+			return 0, err
+		}
+		// g.name is like "Group A"; labels are "Winner Group A", "Runner-up Group A".
+		if len(st) >= 1 {
+			labelToPID["Winner "+g.name] = st[0].ParticipantID
+		}
+		if len(st) >= 2 {
+			labelToPID["Runner-up "+g.name] = st[1].ParticipantID
+		}
+	}
+
+	// For each knockout match slot with a source label, fill the participant.
+	rows, err := s.pool.Query(ctx, `
+		SELECT mp.id, mp.source->>'label'
+		FROM match_participants mp
+		JOIN matches m ON m.id = mp.match_id
+		JOIN stages st ON st.id = m.stage_id AND st.kind = 'knockout'
+		WHERE m.event_id = $1 AND mp.source->>'label' IS NOT NULL`, eventID)
+	if err != nil {
+		return 0, err
+	}
+	type upd struct {
+		slotRowID uuid.UUID
+		pid       uuid.UUID
+	}
+	var updates []upd
+	for rows.Next() {
+		var slotRowID uuid.UUID
+		var label string
+		if err := rows.Scan(&slotRowID, &label); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if pid, ok := labelToPID[label]; ok {
+			updates = append(updates, upd{slotRowID, pid})
+		}
+	}
+	rows.Close()
+
+	for _, u := range updates {
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE match_participants SET participant_id = $1 WHERE id = $2`, u.pid, u.slotRowID); err != nil {
+			return 0, err
+		}
+	}
+	return len(updates), nil
+}
+
+// --- Group-knockout read model ---
+
+type GroupTable struct {
+	Name      string     `json:"name"`
+	Standings []Standing `json:"standings"`
+}
+
+type GroupKnockout struct {
+	EventID  uuid.UUID      `json:"event_id"`
+	Groups   []GroupTable   `json:"groups"`
+	Knockout []BracketRound `json:"knockout"`
+}
+
+// GetGroupKnockout returns per-group standings plus the knockout bracket for a
+// group_knockout event.
+func (s *Service) GetGroupKnockout(ctx context.Context, eventID uuid.UUID) (*GroupKnockout, error) {
+	out := &GroupKnockout{EventID: eventID, Groups: []GroupTable{}, Knockout: []BracketRound{}}
+
+	// Groups + their standings (computed per group_id).
+	grows, err := s.pool.Query(ctx, `
+		SELECT g.id, g.name
+		FROM groups g
+		JOIN stages st ON st.id = g.stage_id
+		WHERE st.event_id = $1 AND st.kind = 'group'
+		ORDER BY g.name`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	type grp struct {
+		id   uuid.UUID
+		name string
+	}
+	var groups []grp
+	for grows.Next() {
+		var g grp
+		if err := grows.Scan(&g.id, &g.name); err != nil {
+			grows.Close()
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	grows.Close()
+
+	for _, g := range groups {
+		st, err := s.standingsForGroup(ctx, g.id)
+		if err != nil {
+			return nil, err
+		}
+		out.Groups = append(out.Groups, GroupTable{Name: g.name, Standings: st})
+	}
+
+	// Knockout bracket: reuse the bracket builder but scope to knockout-stage
+	// matches. We fetch and build a rounds tree from those matches only.
+	ko, err := s.knockoutRounds(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	out.Knockout = ko
+	return out, nil
+}
+
+// standingsForGroup computes a standings table for one group's participants.
+func (s *Service) standingsForGroup(ctx context.Context, groupID uuid.UUID) ([]Standing, error) {
+	const q = `
+		WITH parts AS (
+			SELECT DISTINCT p.id, p.display_name, p.seed
+			FROM matches m
+			JOIN match_participants mp ON mp.match_id = m.id
+			JOIN participants p ON p.id = mp.participant_id
+			WHERE m.group_id = $1
+		),
+		played AS (
+			SELECT mp.participant_id AS pid, m.id AS match_id, m.winner_participant_id, mp.slot
+			FROM matches m
+			JOIN match_participants mp ON mp.match_id = m.id
+			WHERE m.group_id = $1 AND m.status = 'completed' AND mp.participant_id IS NOT NULL
+		),
+		setcounts AS (
+			SELECT pl.pid,
+			       COALESCE(SUM(CASE WHEN pl.slot=1 THEN ms.p1_games ELSE ms.p2_games END),0) AS sf,
+			       COALESCE(SUM(CASE WHEN pl.slot=1 THEN ms.p2_games ELSE ms.p1_games END),0) AS sa
+			FROM played pl LEFT JOIN match_scores ms ON ms.match_id = pl.match_id
+			GROUP BY pl.pid
+		)
+		SELECT pr.id, pr.display_name, pr.seed,
+		       COUNT(pl.match_id) AS played,
+		       COUNT(*) FILTER (WHERE pl.winner_participant_id = pr.id) AS won,
+		       COUNT(*) FILTER (WHERE pl.winner_participant_id IS NOT NULL AND pl.winner_participant_id <> pr.id) AS lost,
+		       COALESCE(sc.sf,0), COALESCE(sc.sa,0)
+		FROM parts pr
+		LEFT JOIN played pl ON pl.pid = pr.id
+		LEFT JOIN setcounts sc ON sc.pid = pr.id
+		GROUP BY pr.id, pr.display_name, pr.seed, sc.sf, sc.sa
+		ORDER BY won DESC, (COALESCE(sc.sf,0)-COALESCE(sc.sa,0)) DESC, pr.display_name`
+	rows, err := s.pool.Query(ctx, q, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Standing{}
+	for rows.Next() {
+		var st Standing
+		if err := rows.Scan(&st.ParticipantID, &st.DisplayName, &st.Seed,
+			&st.Played, &st.Won, &st.Lost, &st.SetsFor, &st.SetsAgainst); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// knockoutRounds builds the rounds tree for an event's knockout-stage matches,
+// including source labels for unresolved feeds.
+func (s *Service) knockoutRounds(ctx context.Context, eventID uuid.UUID) ([]BracketRound, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT m.id, m.match_no, m.status, m.next_match_id, m.winner_participant_id,
+		       mp.slot, mp.participant_id, p.display_name, p.seed, mp.source->>'label'
+		FROM matches m
+		JOIN stages st ON st.id = m.stage_id AND st.kind = 'knockout'
+		LEFT JOIN match_participants mp ON mp.match_id = m.id
+		LEFT JOIN participants p ON p.id = mp.participant_id
+		WHERE m.event_id = $1
+		ORDER BY m.match_no, mp.slot`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type mrec struct {
+		matchNo int
+		status  string
+		next    *uuid.UUID
+		winner  *uuid.UUID
+		slots   []BracketSlot
+	}
+	order := []uuid.UUID{}
+	byID := map[uuid.UUID]*mrec{}
+	for rows.Next() {
+		var mid uuid.UUID
+		var matchNo int
+		var status string
+		var next, winner, pid *uuid.UUID
+		var slot *int
+		var name, label *string
+		var seed *int
+		if err := rows.Scan(&mid, &matchNo, &status, &next, &winner, &slot, &pid, &name, &seed, &label); err != nil {
+			return nil, err
+		}
+		rec, ok := byID[mid]
+		if !ok {
+			rec = &mrec{matchNo: matchNo, status: status, next: next, winner: winner}
+			byID[mid] = rec
+			order = append(order, mid)
+		}
+		if slot != nil {
+			rec.slots = append(rec.slots, BracketSlot{Slot: *slot, ParticipantID: pid, DisplayName: name, Seed: seed, SourceLabel: label})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(order) == 0 {
+		return []BracketRound{}, nil
+	}
+
+	// Round depth from the final (next == nil).
+	roundOf := map[uuid.UUID]int{}
+	var maxHops int
+	var hops func(id uuid.UUID) int
+	hops = func(id uuid.UUID) int {
+		if v, ok := roundOf[id]; ok {
+			return v
+		}
+		rec := byID[id]
+		if rec == nil || rec.next == nil {
+			roundOf[id] = 0
+			return 0
+		}
+		v := hops(*rec.next) + 1
+		roundOf[id] = v
+		return v
+	}
+	for _, id := range order {
+		if h := hops(id); h > maxHops {
+			maxHops = h
+		}
+	}
+	name := func(fromFinal int) string {
+		switch fromFinal {
+		case 0:
+			return "Final"
+		case 1:
+			return "Semifinal"
+		case 2:
+			return "Quarterfinal"
+		default:
+			return fmt.Sprintf("Round of %d", 1<<(fromFinal+1))
+		}
+	}
+	roundsMap := map[int][]BracketMatch{}
+	for _, id := range order {
+		rec := byID[id]
+		rn := maxHops - roundOf[id] + 1
+		roundsMap[rn] = append(roundsMap[rn], BracketMatch{
+			ID: id, MatchNo: rec.matchNo, Status: rec.status,
+			WinnerParticipantID: rec.winner, Participants: rec.slots,
+		})
+	}
+	var out []BracketRound
+	for rn := 1; rn <= maxHops+1; rn++ {
+		out = append(out, BracketRound{RoundNumber: rn, Name: name(maxHops - rn + 1), Matches: roundsMap[rn]})
+	}
+	return out, nil
+}
+
 func insertSlot(ctx context.Context, tx pgx.Tx, matchID uuid.UUID, slot int, s Slot) error {
-	// A bye or a fed (winner-of) slot has no participant yet.
+	// A bye or a fed (winner-of / group-position) slot has no participant yet.
 	var pid *uuid.UUID
 	if s.ParticipantID != nil {
 		pid = s.ParticipantID
 	}
+	// A group-knockout placeholder carries a display label in source jsonb.
+	var source *string
+	if s.SourceLabel != "" {
+		j := `{"label":` + jsonString(s.SourceLabel) + `}`
+		source = &j
+	}
 	_, err := tx.Exec(ctx, `
-		INSERT INTO match_participants (match_id, participant_id, slot)
-		VALUES ($1, $2, $3)`, matchID, pid, slot)
+		INSERT INTO match_participants (match_id, participant_id, slot, source)
+		VALUES ($1, $2, $3, $4::jsonb)`, matchID, pid, slot, source)
 	return err
+}
+
+// jsonString quotes a string for embedding in a small JSON literal.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

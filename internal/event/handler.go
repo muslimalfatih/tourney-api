@@ -25,6 +25,7 @@ func NewHandler(svc *Service, drawSvc *draw.Service) *Handler {
 func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
 	rg.GET("/events/:id/bracket", h.getBracket)
 	rg.GET("/events/:id/standings", h.getPublicStandings)
+	rg.GET("/events/:id/groups", h.getGroupKnockout)
 }
 
 func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
@@ -33,6 +34,7 @@ func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	rg.GET("/events/:id", h.get)
 	rg.DELETE("/events/:id", h.remove)
 	rg.POST("/events/:id/draw", h.generateDraw)
+	rg.POST("/events/:id/resolve-groups", h.resolveGroups)
 }
 
 func orgScope(c *gin.Context) *uuid.UUID {
@@ -185,4 +187,40 @@ func (h *Handler) getPublicStandings(c *gin.Context) {
 		return
 	}
 	server.OK(c, gin.H{"event_id": id, "standings": standings})
+}
+
+// resolveGroups fills the knockout placeholders with the group finishers.
+func (h *Handler) resolveGroups(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid event id"))
+		return
+	}
+	filled, err := h.draw.ResolveGroups(c.Request.Context(), id, orgScope(c))
+	switch {
+	case errors.Is(err, draw.ErrNotFound):
+		server.Error(c, server.ErrNotFound("event not found"))
+		return
+	case errors.Is(err, draw.ErrForbidden):
+		server.Error(c, server.ErrForbidden(""))
+		return
+	case err != nil:
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, gin.H{"event_id": id, "filled": filled})
+}
+
+func (h *Handler) getGroupKnockout(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid event id"))
+		return
+	}
+	gk, err := h.draw.GetGroupKnockout(c.Request.Context(), id)
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, gk)
 }

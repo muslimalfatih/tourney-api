@@ -17,15 +17,20 @@ type Entry struct {
 
 // Slot is a position in a match. Exactly one of ParticipantID / IsBye is set
 // once the draw is placed; both nil means the slot is filled by the winner of a
-// prior match (a "feed").
+// prior match (a "feed"). SourceLabel describes an unresolved feed for display
+// (e.g. "Winner Group A") until the group stage completes.
 type Slot struct {
 	ParticipantID *uuid.UUID
 	IsBye         bool
+	SourceLabel   string
 }
 
 // Match is a generated match in the bracket. NextMatchIndex/NextSlot describe
 // where the winner advances, forming the progression graph the frontend renders
 // and the backend persists as matches.next_match_id.
+//
+// GroupIndex is -1 for knockout matches, or the 0-based group number for group
+// stage matches (group-knockout format).
 type Match struct {
 	Round        int
 	MatchInRound int
@@ -33,6 +38,7 @@ type Match struct {
 	Slot2        Slot
 	NextMatchIdx int // index into the flat match slice; -1 for the final
 	NextSlot     int // 1 or 2
+	GroupIndex   int // -1 = knockout; >=0 = group stage
 }
 
 // GenerateSingleElimination builds a seeded single-elimination bracket. The
@@ -85,6 +91,11 @@ func GenerateSingleElimination(entries []Entry) []Match {
 		last := &matches[len(matches)-1]
 		last.NextMatchIdx = -1
 		last.NextSlot = 0
+	}
+
+	// Single elimination has no group stage.
+	for i := range matches {
+		matches[i].GroupIndex = -1
 	}
 
 	return matches

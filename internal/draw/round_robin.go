@@ -53,6 +53,11 @@ func GenerateRoundRobin(entries []Entry) []Match {
 		idx[1] = last
 	}
 
+	// Standalone round robin is a single flat group (no group-knockout staging).
+	for i := range matches {
+		matches[i].GroupIndex = -1
+	}
+
 	return matches
 }
 
