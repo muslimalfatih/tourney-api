@@ -163,11 +163,19 @@ type BracketSlot struct {
 	Seed          *int       `json:"seed"`
 }
 
+// BracketSet is one set's games for both sides, for compact score display.
+type BracketSet struct {
+	P1 int `json:"p1"`
+	P2 int `json:"p2"`
+}
+
 type BracketMatch struct {
-	ID           uuid.UUID     `json:"id"`
-	MatchNo      int           `json:"match_no"`
-	Status       string        `json:"status"`
-	Participants []BracketSlot `json:"participants"`
+	ID                  uuid.UUID     `json:"id"`
+	MatchNo             int           `json:"match_no"`
+	Status              string        `json:"status"`
+	WinnerParticipantID *uuid.UUID    `json:"winner_participant_id"`
+	Participants        []BracketSlot `json:"participants"`
+	Sets                []BracketSet  `json:"sets"`
 }
 
 type BracketRound struct {
@@ -195,9 +203,9 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		return nil, err
 	}
 
-	// Load matches with their next pointer, plus each slot's participant name/seed.
+	// Load matches with their next pointer + winner, plus each slot's participant.
 	rows, err := s.pool.Query(ctx, `
-		SELECT m.id, m.match_no, m.status, m.next_match_id,
+		SELECT m.id, m.match_no, m.status, m.next_match_id, m.winner_participant_id,
 		       mp.slot, mp.participant_id, p.display_name, p.seed
 		FROM matches m
 		LEFT JOIN match_participants mp ON mp.match_id = m.id
@@ -213,7 +221,9 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		matchNo int
 		status  string
 		next    *uuid.UUID
+		winner  *uuid.UUID
 		slots   []BracketSlot
+		sets    []BracketSet
 	}
 	order := []uuid.UUID{}
 	byID := map[uuid.UUID]*mrec{}
@@ -221,17 +231,17 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		var mid uuid.UUID
 		var matchNo int
 		var status string
-		var next *uuid.UUID
+		var next, winner *uuid.UUID
 		var slot *int
 		var pid *uuid.UUID
 		var name *string
 		var seed *int
-		if err := rows.Scan(&mid, &matchNo, &status, &next, &slot, &pid, &name, &seed); err != nil {
+		if err := rows.Scan(&mid, &matchNo, &status, &next, &winner, &slot, &pid, &name, &seed); err != nil {
 			return nil, err
 		}
 		rec, ok := byID[mid]
 		if !ok {
-			rec = &mrec{matchNo: matchNo, status: status, next: next}
+			rec = &mrec{matchNo: matchNo, status: status, next: next, winner: winner}
 			byID[mid] = rec
 			order = append(order, mid)
 		}
@@ -240,6 +250,31 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		}
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Load set scores for all matches in this event in one pass.
+	srows, err := s.pool.Query(ctx, `
+		SELECT ms.match_id, ms.p1_games, ms.p2_games
+		FROM match_scores ms
+		JOIN matches m ON m.id = ms.match_id
+		WHERE m.event_id = $1
+		ORDER BY ms.match_id, ms.set_number`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer srows.Close()
+	for srows.Next() {
+		var mid uuid.UUID
+		var p1, p2 int
+		if err := srows.Scan(&mid, &p1, &p2); err != nil {
+			return nil, err
+		}
+		if rec, ok := byID[mid]; ok {
+			rec.sets = append(rec.sets, BracketSet{P1: p1, P2: p2})
+		}
+	}
+	if err := srows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -288,7 +323,8 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		fromFinal := roundOf[id]
 		rn := maxHops - fromFinal + 1
 		roundsMap[rn] = append(roundsMap[rn], BracketMatch{
-			ID: id, MatchNo: rec.matchNo, Status: rec.status, Participants: rec.slots,
+			ID: id, MatchNo: rec.matchNo, Status: rec.status,
+			WinnerParticipantID: rec.winner, Participants: rec.slots, Sets: rec.sets,
 		})
 	}
 

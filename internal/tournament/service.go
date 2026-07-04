@@ -55,7 +55,17 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID, orgID *uuid.UUID) (*Tou
 }
 
 func (s *Service) GetPublic(ctx context.Context, slug string) (*Tournament, error) {
-	return s.repo.GetBySlug(ctx, slug)
+	t, err := s.repo.GetBySlug(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	// Attach events so the public site can list divisions and default a bracket.
+	events, err := s.repo.EventsFor(ctx, t.ID)
+	if err != nil {
+		return nil, err
+	}
+	t.Events = events
+	return t, nil
 }
 
 // Create derives a unique slug if none supplied and persists the tournament.

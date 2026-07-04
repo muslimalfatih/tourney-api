@@ -1,21 +1,26 @@
-// Package match owns matches, match participants, scores and winner
-// advancement. Score entry publishes a realtime event so public viewers see
-// live updates over SSE. Skeleton: routes wired, bodies land in milestone 2.
+// Package match owns matches, match scores, winner advancement, and SSE
+// broadcast. Score entry is a normal HTTP call; after persisting, it publishes
+// a realtime event to the tournament's topic so public viewers see live updates.
 package match
 
 import (
+	"errors"
+
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/muslimalfatih/laga-api/internal/realtime"
 	"github.com/muslimalfatih/laga-api/internal/server"
+	"github.com/muslimalfatih/laga-api/internal/server/middleware"
 )
 
 type Handler struct {
+	svc *Service
 	hub *realtime.Hub
 }
 
-func NewHandler(hub *realtime.Hub) *Handler {
-	return &Handler{hub: hub}
+func NewHandler(svc *Service, hub *realtime.Hub) *Handler {
+	return &Handler{svc: svc, hub: hub}
 }
 
 func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
@@ -23,26 +28,108 @@ func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
 }
 
 func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
+	rg.GET("/events/:id/matches", h.listForEvent)
 	rg.PATCH("/matches/:id/score", h.updateScore)
 	rg.PATCH("/matches/:id/status", h.updateStatus)
 }
 
-func (h *Handler) getPublic(c *gin.Context) {
-	server.OK(c, gin.H{"id": c.Param("id"), "status": "pending", "sets": []any{}})
+func orgScope(c *gin.Context) *uuid.UUID {
+	if middleware.Role(c) == middleware.RoleSuperAdmin {
+		return nil
+	}
+	id := middleware.OrgID(c)
+	return &id
 }
 
-// updateScore is a standard HTTP call (NOT websocket). After persisting, it
-// publishes to the tournament topic so SSE subscribers get the live update.
+func (h *Handler) getPublic(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid match id"))
+		return
+	}
+	m, err := h.svc.Get(c.Request.Context(), id)
+	if errors.Is(err, ErrNotFound) {
+		server.Error(c, server.ErrNotFound("match not found"))
+		return
+	}
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, m)
+}
+
+func (h *Handler) listForEvent(c *gin.Context) {
+	eventID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid event id"))
+		return
+	}
+	items, err := h.svc.ListForEvent(c.Request.Context(), eventID)
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	if items == nil {
+		items = []Match{}
+	}
+	server.OK(c, items)
+}
+
+// updateScore persists a score and, if completing, advances the bracket; then
+// broadcasts over SSE so the public bracket/match pages update live.
 func (h *Handler) updateScore(c *gin.Context) {
-	id := c.Param("id")
-	// TODO(m2): persist score, recompute winner, advance bracket.
-	h.hub.Publish("sample-slug", realtime.Event{
-		Name: "match.score",
-		Data: gin.H{"match_id": id},
-	})
-	server.OK(c, gin.H{"id": id})
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid match id"))
+		return
+	}
+	var req ScoreRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, server.ErrValidation("invalid score payload"))
+		return
+	}
+	m, slug, err := h.svc.SubmitScore(c.Request.Context(), id, orgScope(c), req)
+	if handled := respondErr(c, err); handled {
+		return
+	}
+	h.hub.Publish(slug, realtime.Event{Name: "match.score", Data: m})
+	server.OK(c, m)
 }
 
 func (h *Handler) updateStatus(c *gin.Context) {
-	server.OK(c, gin.H{"id": c.Param("id")})
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid match id"))
+		return
+	}
+	var req StatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, server.ErrValidation("invalid status payload"))
+		return
+	}
+	m, slug, err := h.svc.SetStatus(c.Request.Context(), id, orgScope(c), req)
+	if handled := respondErr(c, err); handled {
+		return
+	}
+	h.hub.Publish(slug, realtime.Event{Name: "match.status", Data: m})
+	server.OK(c, m)
+}
+
+func respondErr(c *gin.Context, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, ErrNotFound):
+		server.Error(c, server.ErrNotFound("match not found"))
+	case errors.Is(err, ErrForbidden):
+		server.Error(c, server.ErrForbidden(""))
+	case errors.Is(err, ErrNoScores):
+		server.Error(c, server.ErrValidation("at least one set is required"))
+	case errors.Is(err, ErrNoWinner):
+		server.Error(c, server.ErrValidation("scores do not determine a winner"))
+	default:
+		server.Error(c, server.ErrInternal(""))
+	}
+	return true
 }

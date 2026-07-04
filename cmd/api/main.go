@@ -69,7 +69,7 @@ func run() error {
 	tournamentHandler := tournament.NewHandler(tournament.NewService(pool))
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)
 	participantHandler := participant.NewHandler(participant.NewService(pool))
-	matchHandler := match.NewHandler(hub)
+	matchHandler := match.NewHandler(match.NewService(pool), hub)
 	scheduleHandler := schedule.NewHandler()
 	platformHandler := platform.NewHandler()
 

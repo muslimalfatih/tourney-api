@@ -28,6 +28,17 @@ type Tournament struct {
 	PublishedAt *time.Time     `json:"published_at"`
 	CreatedAt   time.Time      `json:"created_at"`
 	EventCount  int            `json:"event_count"`
+	// Events is populated only on public reads so the public site can list
+	// divisions and pick a default bracket.
+	Events []PublicEvent `json:"events,omitempty"`
+}
+
+// PublicEvent is a lightweight event summary embedded in the public payload.
+type PublicEvent struct {
+	ID         uuid.UUID `json:"id"`
+	Name       string    `json:"name"`
+	Discipline string    `json:"discipline"`
+	Format     string    `json:"format"`
 }
 
 // Repository is the tournament data-access layer (pgx directly, matching the
@@ -98,6 +109,26 @@ func (r *Repository) GetBySlug(ctx context.Context, slug string) (*Tournament, e
 		FROM tournaments t
 		WHERE t.slug = $1`
 	return scanFull(r.pool.QueryRow(ctx, q, slug))
+}
+
+// EventsFor returns a tournament's events for the public payload.
+func (r *Repository) EventsFor(ctx context.Context, tournamentID uuid.UUID) ([]PublicEvent, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, name, discipline, format FROM events WHERE tournament_id = $1 ORDER BY created_at`,
+		tournamentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PublicEvent{}
+	for rows.Next() {
+		var e PublicEvent
+		if err := rows.Scan(&e.ID, &e.Name, &e.Discipline, &e.Format); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // Create inserts a tournament and returns the full row.
