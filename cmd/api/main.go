@@ -15,6 +15,7 @@ import (
 	"github.com/muslimalfatih/laga-api/internal/audit"
 	"github.com/muslimalfatih/laga-api/internal/auth"
 	"github.com/muslimalfatih/laga-api/internal/config"
+	"github.com/muslimalfatih/laga-api/internal/draw"
 	"github.com/muslimalfatih/laga-api/internal/event"
 	"github.com/muslimalfatih/laga-api/internal/match"
 	"github.com/muslimalfatih/laga-api/internal/participant"
@@ -64,9 +65,10 @@ func run() error {
 
 	_ = audit.NewService(pool) // wired for modules to consume in milestone 1
 
+	drawService := draw.NewService(pool)
 	tournamentHandler := tournament.NewHandler(tournament.NewService(pool))
-	eventHandler := event.NewHandler()
-	participantHandler := participant.NewHandler()
+	eventHandler := event.NewHandler(event.NewService(pool), drawService)
+	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(hub)
 	scheduleHandler := schedule.NewHandler()
 	platformHandler := platform.NewHandler()

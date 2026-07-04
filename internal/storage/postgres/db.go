@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,6 +28,13 @@ func Connect(ctx context.Context, url string, maxConns int32) (*pgxpool.Pool, er
 	cfg.MaxConnLifetime = time.Hour
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.HealthCheckPeriod = time.Minute
+
+	// Supabase's transaction pooler (pgbouncer, port 6543) does not support the
+	// prepared-statement protocol pgx uses by default — the first query on each
+	// fresh connection fails with a prepared-statement error. Using the simple
+	// query protocol avoids server-side prepares entirely, which is the
+	// supported mode behind a transaction pooler.
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

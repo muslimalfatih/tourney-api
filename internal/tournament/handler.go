@@ -1,11 +1,13 @@
 // Package tournament owns tournament CRUD, publish state, and the public
-// read models. This is a skeleton: handlers are wired and return typed shapes
-// so the API contract is exercisable end-to-end; the service/repository bodies
-// are stubbed pending the milestone-1 implementation.
+// read models. Handlers are thin: parse + authorize scope + delegate to the
+// service, then render via the shared JSON envelope.
 package tournament
 
 import (
+	"errors"
+
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/muslimalfatih/laga-api/internal/server"
 	"github.com/muslimalfatih/laga-api/internal/server/middleware"
@@ -20,14 +22,12 @@ func NewHandler(svc *Service) *Handler {
 }
 
 // RegisterPublic mounts unauthenticated read routes consumed by the web SSR
-// layer. No auth middleware — these are public by design.
+// layer.
 func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
 	rg.GET("/tournaments/:slug", h.getPublicBySlug)
-	rg.GET("/tournaments/:slug/participants", h.listPublicParticipants)
-	rg.GET("/tournaments/:slug/schedule", h.getPublicSchedule)
 }
 
-// RegisterOrganizer mounts the authenticated organizer routes. The caller wraps
+// RegisterOrganizer mounts authenticated organizer routes. The caller wraps
 // this group with Auth + RequireRole(organizer, super_admin).
 func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	rg.GET("/tournaments", h.list)
@@ -38,34 +38,52 @@ func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	rg.POST("/tournaments/:id/unpublish", h.unpublish)
 }
 
-// --- Public read handlers (stubbed shapes) ---
+// orgScope returns the org filter for the caller: a super admin sees all
+// (nil), an organizer is restricted to their org.
+func orgScope(c *gin.Context) *uuid.UUID {
+	if middleware.Role(c) == middleware.RoleSuperAdmin {
+		return nil
+	}
+	id := middleware.OrgID(c)
+	return &id
+}
+
+// --- Public ---
 
 func (h *Handler) getPublicBySlug(c *gin.Context) {
-	slug := c.Param("slug")
-	server.OK(c, gin.H{
-		"slug":     slug,
-		"name":     "Sample Tournament",
-		"sport":    "tennis",
-		"status":   "published",
-		"branding": gin.H{},
-		"events":   []any{},
-	})
+	t, err := h.svc.GetPublic(c.Request.Context(), c.Param("slug"))
+	if errors.Is(err, ErrNotFound) {
+		server.Error(c, server.ErrNotFound("tournament not found"))
+		return
+	}
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	// Only expose published tournaments publicly.
+	if t.Status != "published" {
+		server.Error(c, server.ErrNotFound("tournament not found"))
+		return
+	}
+	server.OK(c, t)
 }
 
-func (h *Handler) listPublicParticipants(c *gin.Context) {
-	server.List(c, []any{}, server.Meta{Page: 1, PerPage: 20, Total: 0})
-}
-
-func (h *Handler) getPublicSchedule(c *gin.Context) {
-	server.OK(c, gin.H{"slots": []any{}})
-}
-
-// --- Organizer handlers (stubbed) ---
+// --- Organizer ---
 
 func (h *Handler) list(c *gin.Context) {
-	// Organizer sees only their org's tournaments; super admin sees all.
-	_ = middleware.OrgID(c)
-	server.List(c, []any{}, server.Meta{Page: 1, PerPage: 20, Total: 0})
+	page, perPage, offset := server.Pagination(c)
+	orgID := middleware.OrgID(c)
+	// Super admin without an org sees nothing in this org-scoped list; they use
+	// the admin endpoints instead. Organizers see their org.
+	items, total, err := h.svc.List(c.Request.Context(), orgID, perPage, offset)
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	if items == nil {
+		items = []Tournament{}
+	}
+	server.List(c, items, server.Meta{Page: page, PerPage: perPage, Total: total})
 }
 
 func (h *Handler) create(c *gin.Context) {
@@ -74,21 +92,91 @@ func (h *Handler) create(c *gin.Context) {
 		server.Error(c, server.ErrValidation("invalid tournament payload"))
 		return
 	}
-	server.Created(c, gin.H{"id": "00000000-0000-0000-0000-000000000000", "name": req.Name, "status": "draft"})
+	orgID := middleware.OrgID(c)
+	if orgID == uuid.Nil {
+		server.Error(c, server.ErrForbidden("only organizers can create tournaments"))
+		return
+	}
+	t, err := h.svc.Create(c.Request.Context(), orgID, req)
+	if errors.Is(err, ErrSlugTaken) {
+		server.Error(c, server.ErrConflict("that slug is already in use"))
+		return
+	}
+	if err != nil {
+		server.Error(c, server.ErrValidation(err.Error()))
+		return
+	}
+	server.Created(c, t)
 }
 
 func (h *Handler) get(c *gin.Context) {
-	server.OK(c, gin.H{"id": c.Param("id"), "status": "draft"})
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid tournament id"))
+		return
+	}
+	t, err := h.svc.Get(c.Request.Context(), id, orgScope(c))
+	if errors.Is(err, ErrNotFound) {
+		server.Error(c, server.ErrNotFound("tournament not found"))
+		return
+	}
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, t)
 }
 
 func (h *Handler) update(c *gin.Context) {
-	server.OK(c, gin.H{"id": c.Param("id")})
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid tournament id"))
+		return
+	}
+	var req UpdateTournamentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, server.ErrValidation("invalid update payload"))
+		return
+	}
+	t, err := h.svc.Update(c.Request.Context(), id, orgScope(c), req)
+	if errors.Is(err, ErrNotFound) {
+		server.Error(c, server.ErrNotFound("tournament not found"))
+		return
+	}
+	if err != nil {
+		server.Error(c, server.ErrValidation(err.Error()))
+		return
+	}
+	server.OK(c, t)
 }
 
 func (h *Handler) publish(c *gin.Context) {
-	server.OK(c, gin.H{"id": c.Param("id"), "status": "published"})
+	h.setStatus(c, true)
 }
 
 func (h *Handler) unpublish(c *gin.Context) {
-	server.OK(c, gin.H{"id": c.Param("id"), "status": "draft"})
+	h.setStatus(c, false)
+}
+
+func (h *Handler) setStatus(c *gin.Context, publish bool) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid tournament id"))
+		return
+	}
+	var t *Tournament
+	if publish {
+		t, err = h.svc.Publish(c.Request.Context(), id, orgScope(c))
+	} else {
+		t, err = h.svc.Unpublish(c.Request.Context(), id, orgScope(c))
+	}
+	if errors.Is(err, ErrNotFound) {
+		server.Error(c, server.ErrNotFound("tournament not found"))
+		return
+	}
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, t)
 }

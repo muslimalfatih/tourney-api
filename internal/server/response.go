@@ -2,9 +2,40 @@ package server
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
+
+// Pagination parses ?page & ?per_page with sane defaults and caps, returning
+// the 1-based page, per-page size, and computed SQL offset. This is the single
+// place list endpoints read pagination from, keeping the convention uniform.
+func Pagination(c *gin.Context) (page, perPage, offset int) {
+	page = atoiDefault(c.Query("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	perPage = atoiDefault(c.Query("per_page"), 20)
+	if perPage < 1 {
+		perPage = 20
+	}
+	if perPage > 100 {
+		perPage = 100
+	}
+	offset = (page - 1) * perPage
+	return page, perPage, offset
+}
+
+func atoiDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	return n
+}
 
 // JSON response conventions (documented in api/openapi.yaml):
 //
