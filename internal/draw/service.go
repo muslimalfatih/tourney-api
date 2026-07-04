@@ -477,6 +477,39 @@ func (s *Service) GetStandings(ctx context.Context, eventID uuid.UUID) ([]Standi
 	return out, rows.Err()
 }
 
+// MaybeResolveGroups checks whether a just-completed match belongs to a
+// group-knockout group stage and, if the whole group stage is now complete,
+// fills the knockout placeholders. It is a no-op for other formats or while any
+// group match is still outstanding. Returns true if it resolved. Safe to call
+// after every score; errors are returned so the caller can log but not fail.
+func (s *Service) MaybeResolveGroups(ctx context.Context, matchID uuid.UUID) (bool, error) {
+	// Is this match part of a group stage? (has a group_id)
+	var eventID uuid.UUID
+	var groupID *uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`SELECT event_id, group_id FROM matches WHERE id = $1`, matchID).Scan(&eventID, &groupID)
+	if err != nil || groupID == nil {
+		return false, err
+	}
+
+	// Are all group-stage matches for this event completed?
+	var remaining int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM matches m JOIN stages st ON st.id = m.stage_id AND st.kind = 'group'
+		WHERE m.event_id = $1 AND m.status NOT IN ('completed','bye','walkover')`,
+		eventID).Scan(&remaining); err != nil {
+		return false, err
+	}
+	if remaining > 0 {
+		return false, nil
+	}
+
+	// All groups done → resolve (nil org = system, already authorized upstream).
+	_, err = s.ResolveGroups(ctx, eventID, nil)
+	return err == nil, err
+}
+
 // ResolveGroups fills the knockout placeholders (Winner/Runner-up Group X) with
 // the actual group finishers, once the group stage is complete. It is
 // idempotent: re-running re-resolves from current standings. Returns the number

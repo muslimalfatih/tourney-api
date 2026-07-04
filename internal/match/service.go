@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/muslimalfatih/laga-api/internal/draw"
 )
 
 var (
@@ -27,10 +29,11 @@ type StatusRequest struct {
 
 type Service struct {
 	repo *Repository
+	draw *draw.Service
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{repo: NewRepository(pool)}
+	return &Service{repo: NewRepository(pool), draw: draw.NewService(pool)}
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (*Match, error) {
@@ -83,6 +86,12 @@ func (s *Service) SubmitScore(ctx context.Context, matchID uuid.UUID, orgID *uui
 
 	if err := s.repo.SaveScore(ctx, matchID, req.Sets, status, winnerID, current.NextMatchID, current.NextSlot); err != nil {
 		return nil, "", err
+	}
+
+	// If this completed a group-knockout group stage, auto-fill the knockout.
+	// Best-effort: a failure here must not fail the score submission.
+	if req.Complete {
+		_, _ = s.draw.MaybeResolveGroups(ctx, matchID)
 	}
 
 	updated, err := s.repo.Get(ctx, matchID)
