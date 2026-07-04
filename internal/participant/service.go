@@ -49,6 +49,18 @@ func (s *Service) List(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID)
 	return s.repo.ListByEvent(ctx, eventID)
 }
 
+// ListPublic returns an event's roster only if its tournament is published.
+func (s *Service) ListPublic(ctx context.Context, eventID uuid.UUID) ([]Participant, error) {
+	published, err := s.repo.EventTournamentPublished(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if !published {
+		return nil, ErrNotFound
+	}
+	return s.repo.ListByEvent(ctx, eventID)
+}
+
 // Add creates the right kind of entry based on the event's discipline.
 func (s *Service) Add(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID, req AddParticipantRequest) (*Participant, error) {
 	discipline, err := s.authorizeEvent(ctx, eventID, orgID)

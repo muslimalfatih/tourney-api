@@ -21,6 +21,11 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+func (h *Handler) RegisterPublic(rg *gin.RouterGroup) {
+	// Public roster for an event, only if its tournament is published.
+	rg.GET("/events/:id/participants", h.listPublic)
+}
+
 func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	rg.GET("/events/:id/participants", h.list)
 	rg.POST("/events/:id/participants", h.add)
@@ -43,6 +48,23 @@ func (h *Handler) list(c *gin.Context) {
 		return
 	}
 	items, err := h.svc.List(c.Request.Context(), eventID, orgScope(c))
+	if handled := respondErr(c, err); handled {
+		return
+	}
+	if items == nil {
+		items = []Participant{}
+	}
+	server.OK(c, items)
+}
+
+// listPublic serves the roster for a published tournament's event (no auth).
+func (h *Handler) listPublic(c *gin.Context) {
+	eventID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid event id"))
+		return
+	}
+	items, err := h.svc.ListPublic(c.Request.Context(), eventID)
 	if handled := respondErr(c, err); handled {
 		return
 	}

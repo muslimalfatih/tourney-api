@@ -87,6 +87,7 @@ func run() error {
 		RegisterPublicRoutes: func(rg *gin.RouterGroup) {
 			tournamentHandler.RegisterPublic(rg)
 			eventHandler.RegisterPublic(rg)
+			participantHandler.RegisterPublic(rg)
 			matchHandler.RegisterPublic(rg)
 			realtimeHandler.Register(rg)
 		},

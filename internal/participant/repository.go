@@ -140,6 +140,23 @@ func (r *Repository) Delete(ctx context.Context, id uuid.UUID) (uuid.UUID, error
 	return eventID, err
 }
 
+// EventTournamentPublished reports whether an event's tournament is published
+// (gates public reads). Returns ErrNotFound if the event does not exist.
+func (r *Repository) EventTournamentPublished(ctx context.Context, eventID uuid.UUID) (bool, error) {
+	var status string
+	err := r.pool.QueryRow(ctx, `
+		SELECT t.status FROM events e
+		JOIN tournaments t ON t.id = e.tournament_id
+		WHERE e.id = $1`, eventID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return status == "published", nil
+}
+
 // EventOrgFor exposes the owning org of a participant's event (for authz).
 func (r *Repository) EventOrgFor(ctx context.Context, participantID uuid.UUID) (uuid.UUID, error) {
 	var orgID uuid.UUID
