@@ -78,11 +78,6 @@ func (s *Service) Generate(ctx context.Context, eventID uuid.UUID, orgID *uuid.U
 		return 0, ErrNotEnough
 	}
 
-	// Only single elimination is wired in M1's first draw slice.
-	if format != "single_elim" {
-		return 0, ErrUnsupportedForm
-	}
-
 	entries := make([]Entry, len(ps))
 	for i, p := range ps {
 		seed := 0
@@ -92,7 +87,16 @@ func (s *Service) Generate(ctx context.Context, eventID uuid.UUID, orgID *uuid.U
 		entries[i] = Entry{ParticipantID: p.id, Seed: seed}
 	}
 
-	matches := GenerateSingleElimination(entries)
+	// Pick the generator by format. Group→knockout is not wired yet.
+	var matches []Match
+	switch format {
+	case "single_elim":
+		matches = GenerateSingleElimination(entries)
+	case "round_robin":
+		matches = GenerateRoundRobin(entries)
+	default:
+		return 0, ErrUnsupportedForm
+	}
 	if len(matches) == 0 {
 		return 0, ErrNotEnough
 	}
@@ -336,6 +340,70 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		})
 	}
 	return b, nil
+}
+
+// --- Round-robin standings ---
+
+type Standing struct {
+	ParticipantID uuid.UUID `json:"participant_id"`
+	DisplayName   string    `json:"display_name"`
+	Seed          *int      `json:"seed"`
+	Played        int       `json:"played"`
+	Won           int       `json:"won"`
+	Lost          int       `json:"lost"`
+	SetsFor       int       `json:"sets_for"`
+	SetsAgainst   int       `json:"sets_against"`
+}
+
+// GetStandings computes a round-robin table from completed matches: matches
+// played, won/lost, and sets for/against (game-based set count). Ordered by
+// wins desc, then set difference.
+func (s *Service) GetStandings(ctx context.Context, eventID uuid.UUID) ([]Standing, error) {
+	// One row per participant with aggregates over their completed matches.
+	const q = `
+		WITH parts AS (
+			SELECT p.id, p.display_name, p.seed FROM participants p WHERE p.event_id = $1
+		),
+		played AS (
+			SELECT mp.participant_id AS pid,
+			       m.id AS match_id, m.winner_participant_id, mp.slot
+			FROM matches m
+			JOIN match_participants mp ON mp.match_id = m.id
+			WHERE m.event_id = $1 AND m.status = 'completed' AND mp.participant_id IS NOT NULL
+		),
+		setcounts AS (
+			SELECT pl.pid,
+			       COALESCE(SUM(CASE WHEN pl.slot = 1 THEN ms.p1_games ELSE ms.p2_games END),0) AS sf,
+			       COALESCE(SUM(CASE WHEN pl.slot = 1 THEN ms.p2_games ELSE ms.p1_games END),0) AS sa
+			FROM played pl
+			LEFT JOIN match_scores ms ON ms.match_id = pl.match_id
+			GROUP BY pl.pid
+		)
+		SELECT pr.id, pr.display_name, pr.seed,
+		       COUNT(pl.match_id) AS played,
+		       COUNT(*) FILTER (WHERE pl.winner_participant_id = pr.id) AS won,
+		       COUNT(*) FILTER (WHERE pl.winner_participant_id IS NOT NULL AND pl.winner_participant_id <> pr.id) AS lost,
+		       COALESCE(sc.sf,0) AS sets_for, COALESCE(sc.sa,0) AS sets_against
+		FROM parts pr
+		LEFT JOIN played pl ON pl.pid = pr.id
+		LEFT JOIN setcounts sc ON sc.pid = pr.id
+		GROUP BY pr.id, pr.display_name, pr.seed, sc.sf, sc.sa
+		ORDER BY won DESC, (COALESCE(sc.sf,0) - COALESCE(sc.sa,0)) DESC, pr.display_name`
+	rows, err := s.pool.Query(ctx, q, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Standing{}
+	for rows.Next() {
+		var st Standing
+		if err := rows.Scan(&st.ParticipantID, &st.DisplayName, &st.Seed,
+			&st.Played, &st.Won, &st.Lost, &st.SetsFor, &st.SetsAgainst); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
 }
 
 func insertSlot(ctx context.Context, tx pgx.Tx, matchID uuid.UUID, slot int, s Slot) error {

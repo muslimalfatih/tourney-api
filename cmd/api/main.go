@@ -70,7 +70,7 @@ func run() error {
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)
 	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(match.NewService(pool), hub)
-	scheduleHandler := schedule.NewHandler()
+	scheduleHandler := schedule.NewHandler(schedule.NewService(pool))
 	platformHandler := platform.NewHandler(platform.NewService(pool))
 
 	// --- Wire routes via the server's registrar hooks ---
@@ -89,6 +89,7 @@ func run() error {
 			eventHandler.RegisterPublic(rg)
 			participantHandler.RegisterPublic(rg)
 			matchHandler.RegisterPublic(rg)
+			scheduleHandler.RegisterPublic(rg)
 			realtimeHandler.Register(rg)
 		},
 		RegisterOrganizerRoutes: func(rg *gin.RouterGroup) {

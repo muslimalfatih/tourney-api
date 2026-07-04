@@ -174,6 +174,15 @@ func (h *Handler) getBracket(c *gin.Context) {
 }
 
 func (h *Handler) getPublicStandings(c *gin.Context) {
-	// Round-robin/group standings land with the draw slice; contract stub for now.
-	server.OK(c, gin.H{"event_id": c.Param("id"), "groups": []any{}})
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid event id"))
+		return
+	}
+	standings, err := h.draw.GetStandings(c.Request.Context(), id)
+	if err != nil {
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, gin.H{"event_id": id, "standings": standings})
 }
