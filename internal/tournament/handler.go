@@ -166,9 +166,9 @@ func (h *Handler) setStatus(c *gin.Context, publish bool) {
 	}
 	var t *Tournament
 	if publish {
-		t, err = h.svc.Publish(c.Request.Context(), id, orgScope(c))
+		t, err = h.svc.Publish(c.Request.Context(), middleware.UserID(c), id, orgScope(c))
 	} else {
-		t, err = h.svc.Unpublish(c.Request.Context(), id, orgScope(c))
+		t, err = h.svc.Unpublish(c.Request.Context(), middleware.UserID(c), id, orgScope(c))
 	}
 	if errors.Is(err, ErrNotFound) {
 		server.Error(c, server.ErrNotFound("tournament not found"))

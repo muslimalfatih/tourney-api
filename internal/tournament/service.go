@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/muslimalfatih/laga-api/internal/audit"
 )
 
 // ErrSlugTaken is returned when a chosen slug already exists.
@@ -39,11 +41,12 @@ type UpdateTournamentRequest struct {
 
 // Service holds tournament business logic.
 type Service struct {
-	repo *Repository
+	repo  *Repository
+	audit *audit.Service
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{repo: NewRepository(pool)}
+	return &Service{repo: NewRepository(pool), audit: audit.NewService(pool)}
 }
 
 func (s *Service) List(ctx context.Context, orgID uuid.UUID, limit, offset int) ([]Tournament, int64, error) {
@@ -123,12 +126,25 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, orgID *uuid.UUID, re
 	return s.repo.Update(ctx, id, orgID, in)
 }
 
-func (s *Service) Publish(ctx context.Context, id uuid.UUID, orgID *uuid.UUID) (*Tournament, error) {
-	return s.repo.SetStatus(ctx, id, orgID, "published")
+func (s *Service) Publish(ctx context.Context, actor uuid.UUID, id uuid.UUID, orgID *uuid.UUID) (*Tournament, error) {
+	return s.setStatus(ctx, actor, id, orgID, "published", "tournament.publish")
 }
 
-func (s *Service) Unpublish(ctx context.Context, id uuid.UUID, orgID *uuid.UUID) (*Tournament, error) {
-	return s.repo.SetStatus(ctx, id, orgID, "draft")
+func (s *Service) Unpublish(ctx context.Context, actor uuid.UUID, id uuid.UUID, orgID *uuid.UUID) (*Tournament, error) {
+	return s.setStatus(ctx, actor, id, orgID, "draft", "tournament.unpublish")
+}
+
+func (s *Service) setStatus(ctx context.Context, actor, id uuid.UUID, orgID *uuid.UUID, status, action string) (*Tournament, error) {
+	t, err := s.repo.SetStatus(ctx, id, orgID, status)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.audit.Record(ctx, audit.Entry{
+		ActorUserID: actor, OrgID: &t.OrgID, TournamentID: &t.ID,
+		Action: action, TargetType: "tournament", TargetID: t.ID.String(),
+		Diff: map[string]any{"status": t.Status},
+	})
+	return t, nil
 }
 
 // ensureUniqueSlug appends -2, -3, ... until the slug is free.

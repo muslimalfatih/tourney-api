@@ -63,7 +63,7 @@ func run() error {
 	hub := realtime.NewHub()
 	realtimeHandler := realtime.NewHandler(hub)
 
-	_ = audit.NewService(pool) // wired for modules to consume in milestone 1
+	auditHandler := audit.NewHandler(audit.NewService(pool))
 
 	drawService := draw.NewService(pool)
 	tournamentHandler := tournament.NewHandler(tournament.NewService(pool))
@@ -71,7 +71,7 @@ func run() error {
 	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(match.NewService(pool), hub)
 	scheduleHandler := schedule.NewHandler()
-	platformHandler := platform.NewHandler()
+	platformHandler := platform.NewHandler(platform.NewService(pool))
 
 	// --- Wire routes via the server's registrar hooks ---
 
@@ -100,6 +100,7 @@ func run() error {
 		},
 		RegisterAdminRoutes: func(rg *gin.RouterGroup) {
 			platformHandler.RegisterAdmin(rg)
+			auditHandler.RegisterAdmin(rg)
 		},
 	}
 
