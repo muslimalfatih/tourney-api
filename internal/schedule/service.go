@@ -23,6 +23,15 @@ type CreateSlotRequest struct {
 	EndsAt       string  `json:"ends_at" binding:"required"`
 }
 
+// UpdateSlotRequest edits an existing slot's court, assigned match, and time.
+// No tournament_id — the slot is looked up by its own id and re-authorized.
+type UpdateSlotRequest struct {
+	CourtID  string  `json:"court_id" binding:"required"`
+	MatchID  *string `json:"match_id"`
+	StartsAt string  `json:"starts_at" binding:"required"` // RFC3339
+	EndsAt   string  `json:"ends_at" binding:"required"`
+}
+
 type Service struct {
 	repo *Repository
 }
@@ -101,6 +110,37 @@ func (s *Service) CreateSlot(ctx context.Context, orgID *uuid.UUID, req CreateSl
 		return nil, errors.New("ends_at must be RFC3339")
 	}
 	return s.repo.CreateSlot(ctx, tid, courtID, matchID, starts, ends)
+}
+
+func (s *Service) UpdateSlot(ctx context.Context, slotID uuid.UUID, orgID *uuid.UUID, req UpdateSlotRequest) (*Slot, error) {
+	owner, err := s.repo.SlotTournamentOrg(ctx, slotID)
+	if err != nil {
+		return nil, err
+	}
+	if orgID != nil && owner != *orgID {
+		return nil, ErrForbidden
+	}
+	courtID, err := uuid.Parse(req.CourtID)
+	if err != nil {
+		return nil, errors.New("invalid court_id")
+	}
+	var matchID *uuid.UUID
+	if req.MatchID != nil && *req.MatchID != "" {
+		m, err := uuid.Parse(*req.MatchID)
+		if err != nil {
+			return nil, errors.New("invalid match_id")
+		}
+		matchID = &m
+	}
+	starts, err := time.Parse(time.RFC3339, req.StartsAt)
+	if err != nil {
+		return nil, errors.New("starts_at must be RFC3339")
+	}
+	ends, err := time.Parse(time.RFC3339, req.EndsAt)
+	if err != nil {
+		return nil, errors.New("ends_at must be RFC3339")
+	}
+	return s.repo.UpdateSlot(ctx, slotID, courtID, matchID, starts, ends)
 }
 
 func (s *Service) DeleteSlot(ctx context.Context, slotID uuid.UUID, orgID *uuid.UUID) error {

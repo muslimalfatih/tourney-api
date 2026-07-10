@@ -21,22 +21,24 @@ var ErrSlugTaken = errors.New("slug already in use")
 // Branding is free-form JSON so white-label config can grow without schema
 // churn (see the branding jsonb column). Slug is optional — derived from name.
 type CreateTournamentRequest struct {
-	Name     string         `json:"name" binding:"required"`
-	Slug     string         `json:"slug"`
-	Sport    string         `json:"sport" binding:"required,oneof=tennis"`
-	Location string         `json:"location"`
-	StartsOn string         `json:"starts_on"` // YYYY-MM-DD
-	EndsOn   string         `json:"ends_on"`
-	Branding map[string]any `json:"branding"`
+	Name        string         `json:"name" binding:"required"`
+	Slug        string         `json:"slug"`
+	Sport       string         `json:"sport" binding:"required,oneof=tennis"`
+	Description string         `json:"description"`
+	Location    string         `json:"location"`
+	StartsOn    string         `json:"starts_on"` // YYYY-MM-DD
+	EndsOn      string         `json:"ends_on"`
+	Branding    map[string]any `json:"branding"`
 }
 
 // UpdateTournamentRequest carries editable fields; all optional (partial update).
 type UpdateTournamentRequest struct {
-	Name     *string        `json:"name"`
-	Location *string        `json:"location"`
-	StartsOn *string        `json:"starts_on"`
-	EndsOn   *string        `json:"ends_on"`
-	Branding map[string]any `json:"branding"`
+	Name        *string        `json:"name"`
+	Description *string        `json:"description"`
+	Location    *string        `json:"location"`
+	StartsOn    *string        `json:"starts_on"`
+	EndsOn      *string        `json:"ends_on"`
+	Branding    map[string]any `json:"branding"`
 }
 
 // Service holds tournament business logic.
@@ -95,20 +97,21 @@ func (s *Service) Create(ctx context.Context, orgID uuid.UUID, req CreateTournam
 	}
 
 	in := CreateInput{
-		OrgID:    orgID,
-		Name:     strings.TrimSpace(req.Name),
-		Slug:     unique,
-		Sport:    req.Sport,
-		Location: strPtr(req.Location),
-		StartsOn: starts,
-		EndsOn:   ends,
-		Branding: req.Branding,
+		OrgID:       orgID,
+		Name:        strings.TrimSpace(req.Name),
+		Slug:        unique,
+		Sport:       req.Sport,
+		Description: strPtr(req.Description),
+		Location:    strPtr(req.Location),
+		StartsOn:    starts,
+		EndsOn:      ends,
+		Branding:    req.Branding,
 	}
 	return s.repo.Create(ctx, in)
 }
 
 func (s *Service) Update(ctx context.Context, id uuid.UUID, orgID *uuid.UUID, req UpdateTournamentRequest) (*Tournament, error) {
-	in := UpdateInput{Name: req.Name, Location: req.Location, Branding: req.Branding}
+	in := UpdateInput{Name: req.Name, Description: req.Description, Location: req.Location, Branding: req.Branding}
 	if req.StartsOn != nil {
 		t, err := parseDate(*req.StartsOn)
 		if err != nil {

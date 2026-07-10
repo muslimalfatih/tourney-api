@@ -174,6 +174,54 @@ func (r *Repository) getSlot(ctx context.Context, id uuid.UUID) (*Slot, error) {
 	return &s, err
 }
 
+// UpdateSlot re-points a slot to a (possibly new) court/match/time. The prior
+// match (if any and now different) is un-stamped; the new match is stamped with
+// the slot's court + start, mirroring CreateSlot's side effect.
+func (r *Repository) UpdateSlot(ctx context.Context, id, courtID uuid.UUID, matchID *uuid.UUID, startsAt, endsAt time.Time) (*Slot, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Which match was on this slot before? Needed to clear its stamp if it's
+	// being unassigned or swapped out.
+	var prevMatch *uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT match_id FROM schedule_slots WHERE id = $1`, id).Scan(&prevMatch); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE schedule_slots SET court_id = $2, match_id = $3, starts_at = $4, ends_at = $5
+		WHERE id = $1`, id, courtID, matchID, startsAt, endsAt); err != nil {
+		return nil, err
+	}
+
+	// Un-stamp the previous match if it's gone or replaced.
+	if prevMatch != nil && (matchID == nil || *prevMatch != *matchID) {
+		_, _ = tx.Exec(ctx,
+			`UPDATE matches SET scheduled_at = NULL, court_id = NULL,
+			   status = CASE WHEN status = 'scheduled' THEN 'pending'::match_status ELSE status END
+			 WHERE id = $1`, *prevMatch)
+	}
+	// Stamp the new match.
+	if matchID != nil {
+		_, _ = tx.Exec(ctx,
+			`UPDATE matches SET scheduled_at = $2, court_id = $3,
+			   status = CASE WHEN status = 'pending' THEN 'scheduled'::match_status ELSE status END
+			 WHERE id = $1`, *matchID, startsAt, courtID)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return r.getSlot(ctx, id)
+}
+
 func (r *Repository) DeleteSlot(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
 	var tournamentID uuid.UUID
 	err := r.pool.QueryRow(ctx,

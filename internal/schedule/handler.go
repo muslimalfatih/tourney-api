@@ -29,6 +29,7 @@ func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	rg.POST("/tournaments/:id/courts", h.createCourt)
 	rg.GET("/tournaments/:id/schedule", h.listSlots)
 	rg.POST("/schedule/slots", h.createSlot)
+	rg.PATCH("/schedule/slots/:id", h.updateSlot)
 	rg.DELETE("/schedule/slots/:id", h.deleteSlot)
 }
 
@@ -109,6 +110,24 @@ func (h *Handler) createSlot(c *gin.Context) {
 		return
 	}
 	server.Created(c, slot)
+}
+
+func (h *Handler) updateSlot(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid slot id"))
+		return
+	}
+	var req UpdateSlotRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, server.ErrValidation("invalid slot payload"))
+		return
+	}
+	slot, err := h.svc.UpdateSlot(c.Request.Context(), id, orgScope(c), req)
+	if handle(c, err) {
+		return
+	}
+	server.OK(c, slot)
 }
 
 func (h *Handler) deleteSlot(c *gin.Context) {

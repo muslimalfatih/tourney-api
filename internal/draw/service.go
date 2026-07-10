@@ -31,96 +31,16 @@ func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{pool: pool}
 }
 
-type participantRow struct {
-	id   uuid.UUID
-	name string
-	seed *int
-}
-
-// Generate builds and persists the draw for an event. It is idempotent-ish:
-// regenerating deletes the event's existing matches first (a fresh draw).
-func (s *Service) Generate(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID) (int, error) {
-	// Authorize + read the event's format.
-	var ownerOrg uuid.UUID
-	var format string
-	err := s.pool.QueryRow(ctx, `
-		SELECT t.org_id, e.format
-		FROM events e JOIN tournaments t ON t.id = e.tournament_id
-		WHERE e.id = $1`, eventID).Scan(&ownerOrg, &format)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrNotFound
-	}
-	if err != nil {
-		return 0, err
-	}
-	if orgID != nil && ownerOrg != *orgID {
-		return 0, ErrForbidden
-	}
-
-	// Load participants (seeded first via the query order isn't required; the
-	// generator handles seeding).
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, display_name, seed FROM participants WHERE event_id = $1`, eventID)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	var ps []participantRow
-	for rows.Next() {
-		var p participantRow
-		if err := rows.Scan(&p.id, &p.name, &p.seed); err != nil {
-			return 0, err
-		}
-		ps = append(ps, p)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	if len(ps) < 2 {
-		return 0, ErrNotEnough
-	}
-
-	entries := make([]Entry, len(ps))
-	for i, p := range ps {
-		seed := 0
-		if p.seed != nil {
-			seed = *p.seed
-		}
-		entries[i] = Entry{ParticipantID: p.id, Seed: seed}
-	}
-
-	// Pick the generator by format.
-	var matches []Match
-	switch format {
-	case "single_elim":
-		matches = GenerateSingleElimination(entries)
-	case "round_robin":
-		matches = GenerateRoundRobin(entries)
-	case "group_knockout":
-		matches = GenerateGroupKnockout(entries, defaultGroupConfig(len(entries)))
-	default:
-		return 0, ErrUnsupportedForm
-	}
-	if len(matches) == 0 {
-		return 0, ErrNotEnough
-	}
-
-	return len(matches), s.persist(ctx, eventID, matches)
-}
-
-// BuildInput is a Match-builder request. Mode is "auto" or "manual". For manual,
-// Pairs are the organizer's explicit round-1 matchups (Pair, nil side = bye).
-// For auto, Pairs is ignored and random pairs are generated.
+// BuildInput is a Match-builder request. Pairs are the organizer's explicit
+// round-1 matchups (Pair, nil side = bye). Draws are always arranged manually —
+// there is no auto/random pairing.
 type BuildInput struct {
-	Mode  string
 	Pairs []Pair
 }
 
 // Build creates and persists a single-elimination bracket from the Match
-// builder. In "auto" mode it shuffles the event's participants into random pairs
-// (seeding ignored); in "manual" mode it validates and uses the supplied
-// round-1 pairs verbatim. It also records the chosen pairing_mode on the event.
-// Only single-elimination events are supported by the builder for M1.
+// builder's explicit round-1 pairs. It validates the pairs and uses them
+// verbatim (nil side = bye). Only single-elimination events are supported.
 func (s *Service) Build(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID, in BuildInput) (int, error) {
 	// Authorize + read format.
 	var ownerOrg uuid.UUID
@@ -162,31 +82,11 @@ func (s *Service) Build(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID
 		return 0, err
 	}
 
-	var matches []Match
-	mode := in.Mode
-	switch mode {
-	case "manual":
-		pairs, err := validatePairs(in.Pairs, valid)
-		if err != nil {
-			return 0, err
-		}
-		matches = GenerateFromPairs(pairs)
-	case "auto", "":
-		mode = "auto"
-		if len(valid) < 2 {
-			return 0, ErrNotEnough
-		}
-		// Auto pairs = the seeded generator with every seed 0, so placeEntries
-		// fills slots in participant order. Deterministic here; the frontend's
-		// "auto-fill" already offers a shuffle when the organizer wants one.
-		entries := make([]Entry, 0, len(valid))
-		for id := range valid {
-			entries = append(entries, Entry{ParticipantID: id})
-		}
-		matches = GenerateSingleElimination(entries)
-	default:
-		return 0, ErrInvalidPairs
+	pairs, err := validatePairs(in.Pairs, valid)
+	if err != nil {
+		return 0, err
 	}
+	matches := GenerateFromPairs(pairs)
 	if len(matches) == 0 {
 		return 0, ErrNotEnough
 	}
@@ -194,9 +94,9 @@ func (s *Service) Build(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID
 	if err := s.persist(ctx, eventID, matches); err != nil {
 		return 0, err
 	}
-	// Record how this draw was built (a future re-open of the builder reads it).
+	// Draws are always arranged manually now.
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE events SET pairing_mode = $1::pairing_mode WHERE id = $2`, mode, eventID); err != nil {
+		`UPDATE events SET pairing_mode = 'manual'::pairing_mode WHERE id = $1`, eventID); err != nil {
 		return 0, err
 	}
 	return len(matches), nil
@@ -236,25 +136,19 @@ func validatePairs(in []Pair, valid map[uuid.UUID]bool) ([]Pair, error) {
 	return out, nil
 }
 
-// defaultGroupConfig picks a sensible groups/advance split from the entry
-// count: groups of ~4, top 2 advance, giving a power-of-two knockout.
-func defaultGroupConfig(n int) GroupKnockoutConfig {
-	groups := 2
-	switch {
-	case n >= 16:
-		groups = 4
-	case n >= 8:
-		groups = 2
-	}
-	return GroupKnockoutConfig{Groups: groups, Advance: 2}
-}
-
 // persist writes the generated matches and their progression + slot entries in
 // a single transaction. It maps the generator's flat indices to DB uuids, then
 // wires next_match_id in a second pass. When any match carries a GroupIndex >= 0
 // (group-knockout), it also creates a group stage + group rows and a knockout
 // stage, stamping matches.stage_id / group_id.
 func (s *Service) persist(ctx context.Context, eventID uuid.UUID, matches []Match) error {
+	return s.persistWithGroups(ctx, eventID, matches, nil, nil)
+}
+
+// persistWithGroups is persist with optional per-group display names + advance
+// counts (indexed by GroupIndex). nil slices fall back to "Group A/B/…" names
+// and the schema default advance_count. Used by the manual group_knockout build.
+func (s *Service) persistWithGroups(ctx context.Context, eventID uuid.UUID, matches []Match, groupNames []string, groupAdvance []int) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -297,10 +191,17 @@ func (s *Service) persist(ctx context.Context, eventID uuid.UUID, matches []Matc
 		}
 		for g := 0; g <= maxGroup; g++ {
 			name := "Group " + string(rune('A'+g))
+			if g < len(groupNames) && groupNames[g] != "" {
+				name = groupNames[g]
+			}
+			advance := 2 // schema default
+			if g < len(groupAdvance) && groupAdvance[g] > 0 {
+				advance = groupAdvance[g]
+			}
 			var gid uuid.UUID
 			if err := tx.QueryRow(ctx,
-				`INSERT INTO groups (stage_id, name) VALUES ($1,$2) RETURNING id`,
-				groupStageID, name).Scan(&gid); err != nil {
+				`INSERT INTO groups (stage_id, name, advance_count) VALUES ($1,$2,$3) RETURNING id`,
+				groupStageID, name, advance).Scan(&gid); err != nil {
 				return err
 			}
 			groupIDs[g] = gid
@@ -395,6 +296,29 @@ type Bracket struct {
 }
 
 // GetBracket returns the event's persisted draw as a rounds→matches tree. Rounds
+// RequirePublic gates the public read-model endpoints (bracket / standings /
+// groups): the event must be is_public AND its tournament published. Returns
+// ErrNotFound otherwise so hidden or unpublished events 404 identically to a
+// nonexistent one — no existence oracle. Mirrors participant.ListPublic +
+// tournament.EventsFor gating so the public reads are consistent. Organizer
+// reads use org-scoped routes that skip this gate.
+func (s *Service) RequirePublic(ctx context.Context, eventID uuid.UUID) error {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM events e
+			JOIN tournaments t ON t.id = e.tournament_id
+			WHERE e.id = $1 AND e.is_public = true AND t.status = 'published'
+		)`, eventID).Scan(&ok)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // are derived from the progression depth: matches with no next feed the final
 // rounds. For M1 we compute a match's round by walking next_match_id chains.
 func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, error) {
@@ -734,11 +658,46 @@ func (s *Service) ResolveGroups(ctx context.Context, eventID uuid.UUID, orgID *u
 	return len(updates), nil
 }
 
+// SetGroupAdvance updates how many top teams advance from one group. Authorized
+// via the group's event → tournament → org. advance must be >= 1. Returns the
+// group's new advance_count (and event_id for cache-busting the read model).
+func (s *Service) SetGroupAdvance(ctx context.Context, groupID uuid.UUID, orgID *uuid.UUID, advance int) (uuid.UUID, int, error) {
+	if advance < 1 {
+		return uuid.Nil, 0, ErrInvalidPairs
+	}
+	var ownerOrg, eventID uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		SELECT t.org_id, e.id
+		FROM groups g
+		JOIN stages st ON st.id = g.stage_id
+		JOIN events e ON e.id = st.event_id
+		JOIN tournaments t ON t.id = e.tournament_id
+		WHERE g.id = $1`, groupID).Scan(&ownerOrg, &eventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, 0, ErrNotFound
+	}
+	if err != nil {
+		return uuid.Nil, 0, err
+	}
+	if orgID != nil && ownerOrg != *orgID {
+		return uuid.Nil, 0, ErrForbidden
+	}
+	var newAdvance int
+	if err := s.pool.QueryRow(ctx,
+		`UPDATE groups SET advance_count = $2 WHERE id = $1 RETURNING advance_count`,
+		groupID, advance).Scan(&newAdvance); err != nil {
+		return uuid.Nil, 0, err
+	}
+	return eventID, newAdvance, nil
+}
+
 // --- Group-knockout read model ---
 
 type GroupTable struct {
-	Name      string     `json:"name"`
-	Standings []Standing `json:"standings"`
+	ID           uuid.UUID  `json:"id"`
+	Name         string     `json:"name"`
+	AdvanceCount int        `json:"advance_count"`
+	Standings    []Standing `json:"standings"`
 }
 
 type GroupKnockout struct {
@@ -754,7 +713,7 @@ func (s *Service) GetGroupKnockout(ctx context.Context, eventID uuid.UUID) (*Gro
 
 	// Groups + their standings (computed per group_id).
 	grows, err := s.pool.Query(ctx, `
-		SELECT g.id, g.name
+		SELECT g.id, g.name, g.advance_count
 		FROM groups g
 		JOIN stages st ON st.id = g.stage_id
 		WHERE st.event_id = $1 AND st.kind = 'group'
@@ -763,13 +722,14 @@ func (s *Service) GetGroupKnockout(ctx context.Context, eventID uuid.UUID) (*Gro
 		return nil, err
 	}
 	type grp struct {
-		id   uuid.UUID
-		name string
+		id      uuid.UUID
+		name    string
+		advance int
 	}
 	var groups []grp
 	for grows.Next() {
 		var g grp
-		if err := grows.Scan(&g.id, &g.name); err != nil {
+		if err := grows.Scan(&g.id, &g.name, &g.advance); err != nil {
 			grows.Close()
 			return nil, err
 		}
@@ -782,7 +742,7 @@ func (s *Service) GetGroupKnockout(ctx context.Context, eventID uuid.UUID) (*Gro
 		if err != nil {
 			return nil, err
 		}
-		out.Groups = append(out.Groups, GroupTable{Name: g.name, Standings: st})
+		out.Groups = append(out.Groups, GroupTable{ID: g.id, Name: g.name, AdvanceCount: g.advance, Standings: st})
 	}
 
 	// Knockout bracket: reuse the bracket builder but scope to knockout-stage
