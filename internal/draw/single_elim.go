@@ -54,7 +54,6 @@ func GenerateSingleElimination(entries []Entry) []Match {
 	ordered := seedPositions(size)           // bracket slot → seed rank (1-based)
 	placed := placeEntries(entries, ordered) // bracket slot → *Entry (nil = bye)
 
-	rounds := log2(size)
 	var matches []Match
 
 	// Round 1 from the placed slots.
@@ -68,16 +67,22 @@ func GenerateSingleElimination(entries []Entry) []Match {
 		})
 	}
 
-	// Subsequent rounds are empty (winner-fed) matches.
+	return wireFedRounds(matches, firstRoundCount)
+}
+
+// wireFedRounds appends the winner-fed rounds above a filled round 1, wires each
+// round's winners into the next (NextMatchIdx/NextSlot), marks the final, and
+// stamps GroupIndex = -1 (knockout). Shared by the seeded and manual-pairs
+// single-elim builders — round 1 differs, everything above it is identical.
+func wireFedRounds(matches []Match, firstRoundCount int) []Match {
 	prevRoundStart := 0
 	prevRoundCount := firstRoundCount
-	for r := 2; r <= rounds; r++ {
+	for r := 2; r <= log2(firstRoundCount*2); r++ {
 		roundCount := prevRoundCount / 2
 		roundStart := len(matches)
 		for i := 0; i < roundCount; i++ {
 			matches = append(matches, Match{Round: r, MatchInRound: i})
 		}
-		// Wire the previous round's winners into this round.
 		for i := 0; i < prevRoundCount; i++ {
 			m := &matches[prevRoundStart+i]
 			m.NextMatchIdx = roundStart + i/2
@@ -92,12 +97,9 @@ func GenerateSingleElimination(entries []Entry) []Match {
 		last.NextMatchIdx = -1
 		last.NextSlot = 0
 	}
-
-	// Single elimination has no group stage.
 	for i := range matches {
 		matches[i].GroupIndex = -1
 	}
-
 	return matches
 }
 

@@ -30,6 +30,7 @@ func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	rg.GET("/events/:id/participants", h.list)
 	rg.POST("/events/:id/participants", h.add)
 	rg.PATCH("/participants/:id/seed", h.setSeed)
+	rg.PATCH("/participants/:id", h.rename)
 	rg.DELETE("/participants/:id", h.remove)
 }
 
@@ -110,6 +111,24 @@ func (h *Handler) setSeed(c *gin.Context) {
 	server.OK(c, p)
 }
 
+func (h *Handler) rename(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid participant id"))
+		return
+	}
+	var req RenameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, server.ErrValidation("a display name is required"))
+		return
+	}
+	p, err := h.svc.Rename(c.Request.Context(), id, orgScope(c), req)
+	if handled := respondErr(c, err); handled {
+		return
+	}
+	server.OK(c, p)
+}
+
 func (h *Handler) remove(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -132,6 +151,8 @@ func respondErr(c *gin.Context, err error) bool {
 		server.Error(c, server.ErrNotFound("not found"))
 	case errors.Is(err, ErrForbidden):
 		server.Error(c, server.ErrForbidden(""))
+	case errors.Is(err, ErrValidation):
+		server.Error(c, server.ErrValidation("a display name is required"))
 	default:
 		server.Error(c, server.ErrInternal(""))
 	}

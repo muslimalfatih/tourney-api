@@ -20,6 +20,7 @@ var (
 	ErrForbidden       = errors.New("not permitted")
 	ErrNotEnough       = errors.New("need at least 2 participants")
 	ErrUnsupportedForm = errors.New("format not yet supported")
+	ErrInvalidPairs    = errors.New("invalid manual pairings")
 )
 
 type Service struct {
@@ -105,6 +106,134 @@ func (s *Service) Generate(ctx context.Context, eventID uuid.UUID, orgID *uuid.U
 	}
 
 	return len(matches), s.persist(ctx, eventID, matches)
+}
+
+// BuildInput is a Match-builder request. Mode is "auto" or "manual". For manual,
+// Pairs are the organizer's explicit round-1 matchups (Pair, nil side = bye).
+// For auto, Pairs is ignored and random pairs are generated.
+type BuildInput struct {
+	Mode  string
+	Pairs []Pair
+}
+
+// Build creates and persists a single-elimination bracket from the Match
+// builder. In "auto" mode it shuffles the event's participants into random pairs
+// (seeding ignored); in "manual" mode it validates and uses the supplied
+// round-1 pairs verbatim. It also records the chosen pairing_mode on the event.
+// Only single-elimination events are supported by the builder for M1.
+func (s *Service) Build(ctx context.Context, eventID uuid.UUID, orgID *uuid.UUID, in BuildInput) (int, error) {
+	// Authorize + read format.
+	var ownerOrg uuid.UUID
+	var format string
+	err := s.pool.QueryRow(ctx, `
+		SELECT t.org_id, e.format
+		FROM events e JOIN tournaments t ON t.id = e.tournament_id
+		WHERE e.id = $1`, eventID).Scan(&ownerOrg, &format)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if orgID != nil && ownerOrg != *orgID {
+		return 0, ErrForbidden
+	}
+	if format != "single_elim" {
+		return 0, ErrUnsupportedForm
+	}
+
+	// The set of participant ids that legitimately belong to this event; every
+	// manual pairing must reference these and nothing else.
+	valid := map[uuid.UUID]bool{}
+	rows, err := s.pool.Query(ctx, `SELECT id FROM participants WHERE event_id = $1`, eventID)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		valid[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	var matches []Match
+	mode := in.Mode
+	switch mode {
+	case "manual":
+		pairs, err := validatePairs(in.Pairs, valid)
+		if err != nil {
+			return 0, err
+		}
+		matches = GenerateFromPairs(pairs)
+	case "auto", "":
+		mode = "auto"
+		if len(valid) < 2 {
+			return 0, ErrNotEnough
+		}
+		// Auto pairs = the seeded generator with every seed 0, so placeEntries
+		// fills slots in participant order. Deterministic here; the frontend's
+		// "auto-fill" already offers a shuffle when the organizer wants one.
+		entries := make([]Entry, 0, len(valid))
+		for id := range valid {
+			entries = append(entries, Entry{ParticipantID: id})
+		}
+		matches = GenerateSingleElimination(entries)
+	default:
+		return 0, ErrInvalidPairs
+	}
+	if len(matches) == 0 {
+		return 0, ErrNotEnough
+	}
+
+	if err := s.persist(ctx, eventID, matches); err != nil {
+		return 0, err
+	}
+	// Record how this draw was built (a future re-open of the builder reads it).
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE events SET pairing_mode = $1::pairing_mode WHERE id = $2`, mode, eventID); err != nil {
+		return 0, err
+	}
+	return len(matches), nil
+}
+
+// validatePairs enforces the Match-builder rules: no half-filled match (exactly
+// one side set), no team used twice, and every id must belong to the event.
+// Fully-empty pairs are dropped. Requires at least one real matchup.
+func validatePairs(in []Pair, valid map[uuid.UUID]bool) ([]Pair, error) {
+	seen := map[uuid.UUID]bool{}
+	out := make([]Pair, 0, len(in))
+	filled := 0
+	for _, p := range in {
+		a, b := p.A, p.B
+		// A half-filled match (one team, no opponent) is not allowed.
+		if (a == nil) != (b == nil) {
+			return nil, ErrInvalidPairs
+		}
+		if a == nil && b == nil {
+			continue // empty row — skip
+		}
+		for _, id := range []*uuid.UUID{a, b} {
+			if !valid[*id] {
+				return nil, ErrInvalidPairs // unknown / not in this event
+			}
+			if seen[*id] {
+				return nil, ErrInvalidPairs // a team can appear at most once
+			}
+			seen[*id] = true
+		}
+		out = append(out, Pair{A: a, B: b})
+		filled++
+	}
+	if filled == 0 {
+		return nil, ErrNotEnough
+	}
+	return out, nil
 }
 
 // defaultGroupConfig picks a sensible groups/advance split from the entry

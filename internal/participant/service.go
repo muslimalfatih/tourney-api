@@ -3,12 +3,16 @@ package participant
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrForbidden = errors.New("not permitted")
+var (
+	ErrForbidden  = errors.New("not permitted")
+	ErrValidation = errors.New("invalid input")
+)
 
 // AddParticipantRequest adds an entry to an event. For singles, DisplayName is
 // the player's name; for doubles, it's the pairing label (e.g. "Wibowo / Sari").
@@ -19,6 +23,12 @@ type AddParticipantRequest struct {
 
 type SetSeedRequest struct {
 	Seed *int `json:"seed"`
+}
+
+// RenameRequest changes a participant's display name (and the underlying
+// player/team name). For doubles, DisplayName is the pairing label.
+type RenameRequest struct {
+	DisplayName string `json:"display_name" binding:"required"`
 }
 
 type Service struct {
@@ -79,6 +89,16 @@ func (s *Service) SetSeed(ctx context.Context, id uuid.UUID, orgID *uuid.UUID, r
 		return nil, err
 	}
 	return s.repo.SetSeed(ctx, id, req.Seed)
+}
+
+func (s *Service) Rename(ctx context.Context, id uuid.UUID, orgID *uuid.UUID, req RenameRequest) (*Participant, error) {
+	if err := s.authorizeParticipant(ctx, id, orgID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.DisplayName) == "" {
+		return nil, ErrValidation
+	}
+	return s.repo.Rename(ctx, id, req.DisplayName)
 }
 
 func (s *Service) Delete(ctx context.Context, id uuid.UUID, orgID *uuid.UUID) error {

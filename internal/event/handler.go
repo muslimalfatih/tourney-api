@@ -34,7 +34,17 @@ func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	rg.GET("/events/:id", h.get)
 	rg.DELETE("/events/:id", h.remove)
 	rg.POST("/events/:id/draw", h.generateDraw)
+	rg.POST("/events/:id/bracket/build", h.buildBracket)
 	rg.POST("/events/:id/resolve-groups", h.resolveGroups)
+}
+
+// buildBracketRequest is the Match-builder payload. mode is "auto" or "manual";
+// for manual, matches carries the round-1 pairings (team ids, either optional
+// for a bye). Court/time are intentionally not accepted here — scheduling is
+// done per-match from the Bracket tab (M1 scope).
+type buildBracketRequest struct {
+	PairingMode string      `json:"pairing_mode" binding:"required,oneof=auto manual"`
+	Matches     []draw.Pair `json:"matches"`
 }
 
 func orgScope(c *gin.Context) *uuid.UUID {
@@ -153,6 +163,47 @@ func (h *Handler) generateDraw(c *gin.Context) {
 		return
 	}
 	server.OK(c, gin.H{"event_id": id, "matches": count, "generated": true})
+}
+
+// buildBracket runs the Match builder: builds a single-elim bracket from either
+// random pairs (auto) or the organizer's explicit round-1 pairings (manual),
+// overwriting any existing draw.
+func (h *Handler) buildBracket(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid event id"))
+		return
+	}
+	var req buildBracketRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, server.ErrValidation("invalid build payload"))
+		return
+	}
+	count, err := h.draw.Build(c.Request.Context(), id, orgScope(c), draw.BuildInput{
+		Mode:  req.PairingMode,
+		Pairs: req.Matches,
+	})
+	switch {
+	case errors.Is(err, draw.ErrNotFound):
+		server.Error(c, server.ErrNotFound("event not found"))
+		return
+	case errors.Is(err, draw.ErrForbidden):
+		server.Error(c, server.ErrForbidden(""))
+		return
+	case errors.Is(err, draw.ErrNotEnough):
+		server.Error(c, server.ErrValidation("need at least 2 participants"))
+		return
+	case errors.Is(err, draw.ErrInvalidPairs):
+		server.Error(c, server.ErrValidation("pairings are invalid: a team is used twice, a match is half-filled, or an unknown team was supplied"))
+		return
+	case errors.Is(err, draw.ErrUnsupportedForm):
+		server.Error(c, server.ErrValidation("the match builder supports single elimination only"))
+		return
+	case err != nil:
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, gin.H{"event_id": id, "matches": count, "pairing_mode": req.PairingMode, "generated": true})
 }
 
 // --- Public ---

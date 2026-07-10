@@ -116,6 +116,43 @@ func (r *Repository) CreateDoubles(ctx context.Context, eventID uuid.UUID, name 
 	return &p, tx.Commit(ctx)
 }
 
+// Rename updates a participant's display name, keeping the underlying player
+// (singles) or team (doubles) name in sync so the roster and player/team
+// records don't drift. Runs in one tx.
+func (r *Repository) Rename(ctx context.Context, id uuid.UUID, name string) (*Participant, error) {
+	name = strings.TrimSpace(name)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var p Participant
+	err = tx.QueryRow(ctx, `
+		UPDATE participants SET display_name = $2
+		WHERE id = $1
+		RETURNING id, event_id, player_id, team_id, display_name, seed`,
+		id, name).Scan(&p.ID, &p.EventID, &p.PlayerID, &p.TeamID, &p.DisplayName, &p.Seed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Keep the source record's name aligned with the entry.
+	if p.PlayerID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE players SET name = $2 WHERE id = $1`, *p.PlayerID, name); err != nil {
+			return nil, err
+		}
+	}
+	if p.TeamID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE teams SET name = $2 WHERE id = $1`, *p.TeamID, name); err != nil {
+			return nil, err
+		}
+	}
+	return &p, tx.Commit(ctx)
+}
+
 // SetSeed updates a participant's seed within its event.
 func (r *Repository) SetSeed(ctx context.Context, id uuid.UUID, seed *int) (*Participant, error) {
 	var p Participant
