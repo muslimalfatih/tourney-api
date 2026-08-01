@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -279,6 +280,9 @@ type BracketMatch struct {
 	MatchNo             int           `json:"match_no"`
 	Status              string        `json:"status"`
 	WinnerParticipantID *uuid.UUID    `json:"winner_participant_id"`
+	CourtID             *uuid.UUID    `json:"court_id"`
+	CourtName           *string       `json:"court_name"`
+	ScheduledAt         *time.Time    `json:"scheduled_at"`
 	Participants        []BracketSlot `json:"participants"`
 	Sets                []BracketSet  `json:"sets"`
 }
@@ -334,8 +338,10 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 	// Load matches with their next pointer + winner, plus each slot's participant.
 	rows, err := s.pool.Query(ctx, `
 		SELECT m.id, m.match_no, m.status, m.next_match_id, m.winner_participant_id,
+		       m.court_id, m.scheduled_at, c.name,
 		       mp.slot, mp.participant_id, p.display_name, p.seed
 		FROM matches m
+		LEFT JOIN courts c ON c.id = m.court_id
 		LEFT JOIN match_participants mp ON mp.match_id = m.id
 		LEFT JOIN participants p ON p.id = mp.participant_id
 		WHERE m.event_id = $1
@@ -346,12 +352,15 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 	defer rows.Close()
 
 	type mrec struct {
-		matchNo int
-		status  string
-		next    *uuid.UUID
-		winner  *uuid.UUID
-		slots   []BracketSlot
-		sets    []BracketSet
+		matchNo     int
+		status      string
+		next        *uuid.UUID
+		winner      *uuid.UUID
+		courtID     *uuid.UUID
+		courtName   *string
+		scheduledAt *time.Time
+		slots       []BracketSlot
+		sets        []BracketSet
 	}
 	order := []uuid.UUID{}
 	byID := map[uuid.UUID]*mrec{}
@@ -359,17 +368,19 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		var mid uuid.UUID
 		var matchNo int
 		var status string
-		var next, winner *uuid.UUID
+		var next, winner, courtID *uuid.UUID
+		var scheduledAt *time.Time
+		var courtName *string
 		var slot *int
 		var pid *uuid.UUID
 		var name *string
 		var seed *int
-		if err := rows.Scan(&mid, &matchNo, &status, &next, &winner, &slot, &pid, &name, &seed); err != nil {
+		if err := rows.Scan(&mid, &matchNo, &status, &next, &winner, &courtID, &scheduledAt, &courtName, &slot, &pid, &name, &seed); err != nil {
 			return nil, err
 		}
 		rec, ok := byID[mid]
 		if !ok {
-			rec = &mrec{matchNo: matchNo, status: status, next: next, winner: winner}
+			rec = &mrec{matchNo: matchNo, status: status, next: next, winner: winner, courtID: courtID, courtName: courtName, scheduledAt: scheduledAt}
 			byID[mid] = rec
 			order = append(order, mid)
 		}
@@ -452,7 +463,8 @@ func (s *Service) GetBracket(ctx context.Context, eventID uuid.UUID) (*Bracket, 
 		rn := maxHops - fromFinal + 1
 		roundsMap[rn] = append(roundsMap[rn], BracketMatch{
 			ID: id, MatchNo: rec.matchNo, Status: rec.status,
-			WinnerParticipantID: rec.winner, Participants: rec.slots, Sets: rec.sets,
+			WinnerParticipantID: rec.winner, CourtID: rec.courtID, CourtName: rec.courtName,
+			ScheduledAt: rec.scheduledAt, Participants: rec.slots, Sets: rec.sets,
 		})
 	}
 
