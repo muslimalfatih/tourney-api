@@ -13,6 +13,10 @@ type CreateEventRequest struct {
 	Name       string `json:"name" binding:"required"`
 	Discipline string `json:"discipline" binding:"required,oneof=singles doubles"`
 	Format     string `json:"format" binding:"required,oneof=single_elim round_robin group_knockout"`
+	// Optional, and needed at create time rather than in the follow-up patch:
+	// the slug is qualified with the category when a plain name slug is already
+	// taken ("mens-singles-intermediate"), and the slug is only assigned once.
+	Category string `json:"category"`
 }
 
 // UpdateEventRequest patches the public-facing event config. Every field is a
@@ -68,12 +72,46 @@ func (s *Service) Create(ctx context.Context, tournamentID uuid.UUID, orgID *uui
 	if err := s.repo.tournamentOwned(ctx, tournamentID, orgID); err != nil {
 		return nil, err
 	}
-	return s.repo.Create(ctx, CreateInput{
-		TournamentID: tournamentID,
-		Name:         strings.TrimSpace(req.Name),
-		Discipline:   req.Discipline,
-		Format:       req.Format,
-	})
+	name := strings.TrimSpace(req.Name)
+
+	// The slug is assigned once, here, and never recomputed — a later rename
+	// leaves it alone so links already shared keep resolving.
+	//
+	// Read-then-write is racy in principle: two divisions created in the same
+	// millisecond could pick the same slug. The unique index on
+	// (tournament_id, slug) is what actually guarantees correctness; this loop
+	// just makes the common path produce a nice slug. On the (vanishingly rare)
+	// losing write we retry, which re-reads the now-updated set.
+	// ponytail: retry loop over a unique-violation, not an advisory lock —
+	// swap it for a lock if divisions ever get created in bulk concurrently.
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		existing, err := s.repo.ListByTournament(ctx, tournamentID)
+		if err != nil {
+			return nil, err
+		}
+		taken := make(map[string]bool, len(existing))
+		for _, e := range existing {
+			taken[e.Slug] = true
+		}
+
+		ev, err := s.repo.Create(ctx, CreateInput{
+			TournamentID: tournamentID,
+			Name:         name,
+			Slug:         buildSlug(name, strings.TrimSpace(req.Category), taken),
+			Discipline:   req.Discipline,
+			Format:       req.Format,
+			Category:     strings.TrimSpace(req.Category),
+		})
+		if err == nil {
+			return ev, nil
+		}
+		if !isUniqueViolation(err) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // UpdatePublicSettings verifies the event's tournament is owned, then patches

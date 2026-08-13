@@ -18,6 +18,7 @@ type Event struct {
 	ID               uuid.UUID  `json:"id"`
 	TournamentID     uuid.UUID  `json:"tournament_id"`
 	Name             string     `json:"name"`
+	Slug             string     `json:"slug"` // URL identifier, unique per tournament
 	Discipline       string     `json:"discipline"`
 	Format           string     `json:"format"`
 	PairingMode      string     `json:"pairing_mode"`
@@ -54,13 +55,13 @@ func (e *Event) deriveStages() {
 // columns and scanArgs keep the SELECT list and Scan targets in lockstep — the
 // two most error-prone halves of a pgx query. Both public + count columns are
 // included; callers that don't need counts pass literal 0s in RETURNING.
-const eventCols = `e.id, e.tournament_id, e.name, e.discipline, e.format, e.pairing_mode,
+const eventCols = `e.id, e.tournament_id, e.name, e.slug, e.discipline, e.format, e.pairing_mode,
 	e.scoring_profile_id, e.created_at, e.category, e.gender, e.is_public,
 	e.public_display_name, e.public_order`
 
 func (e *Event) scanArgs(participant, match *int) []any {
 	return []any{
-		&e.ID, &e.TournamentID, &e.Name, &e.Discipline, &e.Format, &e.PairingMode,
+		&e.ID, &e.TournamentID, &e.Name, &e.Slug, &e.Discipline, &e.Format, &e.PairingMode,
 		&e.ScoringProfileID, &e.CreatedAt, &e.Category, &e.Gender, &e.IsPublic,
 		&e.PublicDisplayName, &e.PublicOrder, participant, match,
 	}
@@ -133,11 +134,19 @@ func (r *Repository) Create(ctx context.Context, in CreateInput) (*Event, error)
 	// New columns take their schema defaults (gender 'mixed', is_public true,
 	// public_order 0, category/public_display_name null). RETURNING mirrors the
 	// SELECT column order with 0/0 for the participant/match counts.
+	//
+	// `AS e` is load-bearing, not decoration: eventCols qualifies every column
+	// with `e.` because the read queries alias the table (FROM events e) and
+	// Update aliases it too (UPDATE events e SET). Without an alias here the
+	// RETURNING list references a table that isn't in scope and Postgres rejects
+	// the whole statement with 42P01 "missing FROM-clause entry for table e",
+	// which surfaced as a 500 on every single Add Event.
 	q := `
-		INSERT INTO events (tournament_id, name, discipline, format)
-		VALUES ($1, $2, $3::event_discipline, $4::event_format)
+		INSERT INTO events AS e (tournament_id, name, slug, discipline, format, category)
+		VALUES ($1, $2, $3, $4::event_discipline, $5::event_format, NULLIF(btrim($6), ''))
 		RETURNING ` + eventCols + `, 0, 0`
-	return scan(r.pool.QueryRow(ctx, q, in.TournamentID, in.Name, in.Discipline, in.Format))
+	return scan(r.pool.QueryRow(ctx, q,
+		in.TournamentID, in.Name, in.Slug, in.Discipline, in.Format, in.Category))
 }
 
 // Update mutates the public-facing config fields with patch semantics. For the
@@ -193,6 +202,8 @@ func scan(row pgx.Row) (*Event, error) {
 type CreateInput struct {
 	TournamentID uuid.UUID
 	Name         string
+	Slug         string
+	Category     string
 	Discipline   string
 	Format       string
 }

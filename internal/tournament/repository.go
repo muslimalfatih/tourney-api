@@ -39,6 +39,7 @@ type Tournament struct {
 type PublicEvent struct {
 	ID                uuid.UUID `json:"id"`
 	Name              string    `json:"name"`
+	Slug              string    `json:"slug"` // URL identifier, unique per tournament
 	Discipline        string    `json:"discipline"`
 	Format            string    `json:"format"`
 	Category          *string   `json:"category"`
@@ -136,7 +137,7 @@ func (r *Repository) GetBySlug(ctx context.Context, slug string) (*Tournament, e
 // only is_public=true divisions, ordered by public_order then creation.
 func (r *Repository) EventsFor(ctx context.Context, tournamentID uuid.UUID) ([]PublicEvent, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, name, discipline, format, category, gender, public_display_name, public_order
+		`SELECT id, name, slug, discipline, format, category, gender, public_display_name, public_order
 		 FROM events
 		 WHERE tournament_id = $1 AND is_public = true
 		 ORDER BY public_order ASC, created_at ASC`,
@@ -148,7 +149,7 @@ func (r *Repository) EventsFor(ctx context.Context, tournamentID uuid.UUID) ([]P
 	out := []PublicEvent{}
 	for rows.Next() {
 		var e PublicEvent
-		if err := rows.Scan(&e.ID, &e.Name, &e.Discipline, &e.Format,
+		if err := rows.Scan(&e.ID, &e.Name, &e.Slug, &e.Discipline, &e.Format,
 			&e.Category, &e.Gender, &e.PublicDisplayName, &e.PublicOrder); err != nil {
 			return nil, err
 		}
