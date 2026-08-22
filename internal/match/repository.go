@@ -169,6 +169,35 @@ func (r *Repository) ListByEvent(ctx context.Context, eventID uuid.UUID) ([]Matc
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+
+	// Hydrate set scores in one sweep. Without this the organizer matches
+	// page showed blank score columns and seeded EMPTY correction forms for
+	// played matches (found by the Phase 4E browser suite) — the list was
+	// "headers only" while every consumer treated Sets as real.
+	setRows, err := r.pool.Query(ctx, `
+		SELECT s.match_id, s.set_number, s.p1_games, s.p2_games, s.p1_tiebreak, s.p2_tiebreak
+		FROM match_scores s
+		JOIN matches m ON m.id = s.match_id
+		WHERE m.event_id = $1
+		ORDER BY s.match_id, s.set_number`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer setRows.Close()
+	for setRows.Next() {
+		var mid uuid.UUID
+		var st SetScore
+		if err := setRows.Scan(&mid, &st.SetNumber, &st.P1Games, &st.P2Games, &st.P1Tiebreak, &st.P2Tiebreak); err != nil {
+			return nil, err
+		}
+		if m, ok := byID[mid]; ok {
+			m.Sets = append(m.Sets, st)
+		}
+	}
+	if err := setRows.Err(); err != nil {
+		return nil, err
+	}
+
 	out := make([]Match, 0, len(order))
 	for _, id := range order {
 		out = append(out, *byID[id])
