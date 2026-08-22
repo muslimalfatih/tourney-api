@@ -61,16 +61,18 @@ func run() error {
 	authHandler := auth.NewHandler(auth.NewService(auth.NewRepository(pool), tokens))
 
 	hub := realtime.NewHub()
-	realtimeHandler := realtime.NewHandler(hub)
 
 	auditHandler := audit.NewHandler(audit.NewService(pool))
 
 	drawService := draw.NewService(pool)
-	tournamentHandler := tournament.NewHandler(tournament.NewService(pool))
+	tournamentService := tournament.NewService(pool)
+	tournamentHandler := tournament.NewHandler(tournamentService)
+	// The stream gate needs the published check; realtime has no DB of its own.
+	realtimeHandler := realtime.NewHandler(hub, tournamentService.IsPublishedSlug)
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)
 	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(match.NewService(pool), hub)
-	scheduleHandler := schedule.NewHandler(schedule.NewService(pool))
+	scheduleHandler := schedule.NewHandler(schedule.NewService(pool), hub)
 	platformHandler := platform.NewHandler(platform.NewService(pool))
 
 	// --- Wire routes via the server's registrar hooks ---

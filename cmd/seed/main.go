@@ -47,7 +47,9 @@ func run() error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// 3 minutes, not 15s: the Renon Cup dataset makes dozens of sequential
+	// service calls, each a round-trip to the remote Supabase pooler.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	pool, err := postgres.Connect(ctx, cfg.DatabaseURL, 2)
@@ -73,8 +75,14 @@ func run() error {
 		if err := upsertOrganizer(ctx, pool, orgName, orgSlug, orgEmail, orgPass, orgUserName); err != nil {
 			return err
 		}
+		// 3. The deterministic Renon Cup 2026 development dataset (renon.go).
+		//    Idempotent and keyed on natural identifiers throughout; needs the
+		//    org + organizer just seeded, hence the placement inside this branch.
+		if err := seedRenonCup(ctx, pool); err != nil {
+			return err
+		}
 	} else {
-		slog.Info("no SEED_ORGANIZER_EMAIL/PASSWORD set, skipping organizer seed")
+		slog.Info("no SEED_ORGANIZER_EMAIL/PASSWORD set, skipping organizer + tournament seed")
 	}
 
 	return nil

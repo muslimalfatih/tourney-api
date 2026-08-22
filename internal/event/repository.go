@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -26,6 +27,11 @@ type Event struct {
 	CreatedAt        time.Time  `json:"created_at"`
 	ParticipantCount int        `json:"participant_count"`
 	MatchCount       int        `json:"match_count"`
+
+	// Scoring configuration (migration 00009): raw jsonb, validated on write
+	// by match.ParseScoringConfig; '{}' = defaults (best of 3, full deciding
+	// set). Served raw so the client sees exactly what is stored.
+	Scoring json.RawMessage `json:"scoring"`
 
 	// Public-facing configuration (migration 00003).
 	Category          *string `json:"category"`            // organizer-defined; null = uncategorised
@@ -56,13 +62,13 @@ func (e *Event) deriveStages() {
 // two most error-prone halves of a pgx query. Both public + count columns are
 // included; callers that don't need counts pass literal 0s in RETURNING.
 const eventCols = `e.id, e.tournament_id, e.name, e.slug, e.discipline, e.format, e.pairing_mode,
-	e.scoring_profile_id, e.created_at, e.category, e.gender, e.is_public,
+	e.scoring_profile_id, e.created_at, e.scoring, e.category, e.gender, e.is_public,
 	e.public_display_name, e.public_order`
 
 func (e *Event) scanArgs(participant, match *int) []any {
 	return []any{
 		&e.ID, &e.TournamentID, &e.Name, &e.Slug, &e.Discipline, &e.Format, &e.PairingMode,
-		&e.ScoringProfileID, &e.CreatedAt, &e.Category, &e.Gender, &e.IsPublic,
+		&e.ScoringProfileID, &e.CreatedAt, &e.Scoring, &e.Category, &e.Gender, &e.IsPublic,
 		&e.PublicDisplayName, &e.PublicOrder, participant, match,
 	}
 }
@@ -163,13 +169,14 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, in UpdateInput) (
 			gender              = COALESCE($3::event_gender, e.gender),
 			is_public           = COALESCE($4, e.is_public),
 			public_display_name = CASE WHEN $5::text IS NULL THEN e.public_display_name ELSE NULLIF(btrim($5), '') END,
-			public_order        = COALESCE($6, e.public_order)
+			public_order        = COALESCE($6, e.public_order),
+			scoring             = COALESCE($7::jsonb, e.scoring)
 		WHERE e.id = $1
 		RETURNING ` + eventCols + `,
 		          (SELECT COUNT(*) FROM participants p WHERE p.event_id = e.id),
 		          (SELECT COUNT(*) FROM matches m WHERE m.event_id = e.id)`
 	return scan(r.pool.QueryRow(ctx, q,
-		id, in.Category, in.Gender, in.IsPublic, in.PublicDisplayName, in.PublicOrder,
+		id, in.Category, in.Gender, in.IsPublic, in.PublicDisplayName, in.PublicOrder, in.Scoring,
 	))
 }
 
@@ -218,4 +225,7 @@ type UpdateInput struct {
 	IsPublic          *bool
 	PublicDisplayName *string
 	PublicOrder       *int
+	// Scoring is the raw config document; nil leaves it unchanged. Validated
+	// in the service before it reaches SQL.
+	Scoring *string
 }

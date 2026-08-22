@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -49,6 +50,31 @@ func NewService(pool *pgxpool.Pool) *Service {
 // The diff is passed as a JSON string (not []byte): under the simple query
 // protocol used behind the Supabase pooler, a string binds cleanly to jsonb
 // whereas a raw byte slice does not.
+// Execer is the subset of pgx both *pgxpool.Pool and pgx.Tx satisfy, so an
+// audit row can join a caller's transaction (write-then-commit, per the
+// correction flow) instead of racing it from a separate connection.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// RecordTx is Record on a caller-supplied transaction/connection.
+func (s *Service) RecordTx(ctx context.Context, q Execer, e Entry) error {
+	var diff *string
+	if e.Diff != nil {
+		b, err := json.Marshal(e.Diff)
+		if err != nil {
+			return err
+		}
+		str := string(b)
+		diff = &str
+	}
+	_, err := q.Exec(ctx, `
+		INSERT INTO audit_logs (org_id, actor_user_id, tournament_id, action, target_type, target_id, diff)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+		e.OrgID, e.ActorUserID, e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
+	return err
+}
+
 func (s *Service) Record(ctx context.Context, e Entry) error {
 	var diff *string
 	if e.Diff != nil {

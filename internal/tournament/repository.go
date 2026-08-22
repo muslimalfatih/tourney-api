@@ -15,15 +15,22 @@ var ErrNotFound = errors.New("tournament not found")
 
 // Tournament is the persisted record plus a rolled-up event count for lists.
 type Tournament struct {
-	ID          uuid.UUID      `json:"id"`
-	OrgID       uuid.UUID      `json:"org_id"`
-	Name        string         `json:"name"`
-	Slug        string         `json:"slug"`
-	Sport       string         `json:"sport"`
-	Description *string        `json:"description"`
-	Location    *string        `json:"location"`
-	StartsOn    *time.Time     `json:"starts_on"`
-	EndsOn      *time.Time     `json:"ends_on"`
+	ID uuid.UUID `json:"id"`
+	// Never serialized: org ownership is a private organizer concern enforced
+	// server-side; the public payload must not leak it and no client reads it
+	// (caught by inttest.TestSecurityMatrix on its first run).
+	OrgID       uuid.UUID  `json:"-"`
+	Name        string     `json:"name"`
+	Slug        string     `json:"slug"`
+	Sport       string     `json:"sport"`
+	Description *string    `json:"description"`
+	Location    *string    `json:"location"`
+	StartsOn    *time.Time `json:"starts_on"`
+	EndsOn      *time.Time `json:"ends_on"`
+	// Timezone is the tournament's IANA presentation zone (validated at the
+	// write path with time.LoadLocation; default Asia/Makassar). Storage stays
+	// UTC — this only drives tournament-local grouping and display.
+	Timezone    string         `json:"timezone"`
 	Branding    map[string]any `json:"branding"`
 	Status      string         `json:"status"`
 	PublishedAt *time.Time     `json:"published_at"`
@@ -78,7 +85,7 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 func (r *Repository) ListByOrg(ctx context.Context, orgID uuid.UUID, limit, offset int) ([]Tournament, int64, error) {
 	const q = `
 		SELECT t.id, t.org_id, t.name, t.slug, t.sport, t.description, t.location,
-		       t.starts_on, t.ends_on, t.status, t.published_at, t.created_at,
+		       t.starts_on, t.ends_on, t.timezone, t.status, t.published_at, t.created_at,
 		       COUNT(e.id) AS event_count,
 		       COUNT(*) OVER() AS total
 		FROM tournaments t
@@ -100,7 +107,7 @@ func (r *Repository) ListByOrg(ctx context.Context, orgID uuid.UUID, limit, offs
 		var t Tournament
 		if err := rows.Scan(
 			&t.ID, &t.OrgID, &t.Name, &t.Slug, &t.Sport, &t.Description, &t.Location,
-			&t.StartsOn, &t.EndsOn, &t.Status, &t.PublishedAt, &t.CreatedAt,
+			&t.StartsOn, &t.EndsOn, &t.Timezone, &t.Status, &t.PublishedAt, &t.CreatedAt,
 			&t.EventCount, &total,
 		); err != nil {
 			return nil, 0, err
@@ -115,7 +122,7 @@ func (r *Repository) ListByOrg(ctx context.Context, orgID uuid.UUID, limit, offs
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID, orgID *uuid.UUID) (*Tournament, error) {
 	const q = `
 		SELECT t.id, t.org_id, t.name, t.slug, t.sport, t.description, t.location,
-		       t.starts_on, t.ends_on, t.branding, t.status, t.published_at, t.created_at,
+		       t.starts_on, t.ends_on, t.timezone, t.branding, t.status, t.published_at, t.created_at,
 		       (SELECT COUNT(*) FROM events e WHERE e.tournament_id = t.id) AS event_count
 		FROM tournaments t
 		WHERE t.id = $1 AND ($2::uuid IS NULL OR t.org_id = $2)`
@@ -126,7 +133,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID, orgID *uuid.UUID
 func (r *Repository) GetBySlug(ctx context.Context, slug string) (*Tournament, error) {
 	const q = `
 		SELECT t.id, t.org_id, t.name, t.slug, t.sport, t.description, t.location,
-		       t.starts_on, t.ends_on, t.branding, t.status, t.published_at, t.created_at,
+		       t.starts_on, t.ends_on, t.timezone, t.branding, t.status, t.published_at, t.created_at,
 		       (SELECT COUNT(*) FROM events e WHERE e.tournament_id = t.id) AS event_count
 		FROM tournaments t
 		WHERE t.slug = $1`
@@ -162,11 +169,11 @@ func (r *Repository) EventsFor(ctx context.Context, tournamentID uuid.UUID) ([]P
 // Create inserts a tournament and returns the full row.
 func (r *Repository) Create(ctx context.Context, in CreateInput) (*Tournament, error) {
 	const q = `
-		INSERT INTO tournaments (org_id, name, slug, sport, description, location, starts_on, ends_on, branding)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb))
-		RETURNING id, org_id, name, slug, sport, description, location, starts_on, ends_on, branding, status, published_at, created_at, 0`
+		INSERT INTO tournaments (org_id, name, slug, sport, description, location, starts_on, ends_on, timezone, branding)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{}'::jsonb))
+		RETURNING id, org_id, name, slug, sport, description, location, starts_on, ends_on, timezone, branding, status, published_at, created_at, 0`
 	return scanFull(r.pool.QueryRow(ctx, q,
-		in.OrgID, in.Name, in.Slug, in.Sport, in.Description, in.Location, in.StartsOn, in.EndsOn, in.Branding,
+		in.OrgID, in.Name, in.Slug, in.Sport, in.Description, in.Location, in.StartsOn, in.EndsOn, in.Timezone, in.Branding,
 	))
 }
 
@@ -179,12 +186,13 @@ func (r *Repository) Update(ctx context.Context, id uuid.UUID, orgID *uuid.UUID,
 			location    = COALESCE($5, t.location),
 			starts_on   = COALESCE($6, t.starts_on),
 			ends_on     = COALESCE($7, t.ends_on),
-			branding    = COALESCE($8, t.branding)
+			branding    = COALESCE($8, t.branding),
+			timezone    = COALESCE($9, t.timezone)
 		WHERE t.id = $1 AND ($2::uuid IS NULL OR t.org_id = $2)
-		RETURNING t.id, t.org_id, t.name, t.slug, t.sport, t.description, t.location, t.starts_on, t.ends_on, t.branding, t.status, t.published_at, t.created_at,
+		RETURNING t.id, t.org_id, t.name, t.slug, t.sport, t.description, t.location, t.starts_on, t.ends_on, t.timezone, t.branding, t.status, t.published_at, t.created_at,
 		          (SELECT COUNT(*) FROM events e WHERE e.tournament_id = t.id)`
 	return scanFull(r.pool.QueryRow(ctx, q,
-		id, orgID, in.Name, in.Description, in.Location, in.StartsOn, in.EndsOn, in.Branding,
+		id, orgID, in.Name, in.Description, in.Location, in.StartsOn, in.EndsOn, in.Branding, in.Timezone,
 	))
 }
 
@@ -195,12 +203,23 @@ func (r *Repository) SetStatus(ctx context.Context, id uuid.UUID, orgID *uuid.UU
 			status = $3::tournament_status,
 			published_at = CASE WHEN $3 = 'published' THEN now() ELSE t.published_at END
 		WHERE t.id = $1 AND ($2::uuid IS NULL OR t.org_id = $2)
-		RETURNING t.id, t.org_id, t.name, t.slug, t.sport, t.description, t.location, t.starts_on, t.ends_on, t.branding, t.status, t.published_at, t.created_at,
+		RETURNING t.id, t.org_id, t.name, t.slug, t.sport, t.description, t.location, t.starts_on, t.ends_on, t.timezone, t.branding, t.status, t.published_at, t.created_at,
 		          (SELECT COUNT(*) FROM events e WHERE e.tournament_id = t.id)`
 	return scanFull(r.pool.QueryRow(ctx, q, id, orgID, status))
 }
 
 // SlugExists reports whether a slug is already taken (for validation).
+// IsPublishedSlug reports whether a tournament with this slug exists AND is
+// published — the gate for anonymous surfaces (public SSE stream) that key on
+// slug alone. Draft/archived tournaments are invisible here by design.
+func (r *Repository) IsPublishedSlug(ctx context.Context, slug string) (bool, error) {
+	var ok bool
+	err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM tournaments WHERE slug = $1 AND status = 'published')`,
+		slug).Scan(&ok)
+	return ok, err
+}
+
 func (r *Repository) SlugExists(ctx context.Context, slug string) (bool, error) {
 	var exists bool
 	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tournaments WHERE slug = $1)`, slug).Scan(&exists)
@@ -211,7 +230,7 @@ func scanFull(row pgx.Row) (*Tournament, error) {
 	var t Tournament
 	err := row.Scan(
 		&t.ID, &t.OrgID, &t.Name, &t.Slug, &t.Sport, &t.Description, &t.Location,
-		&t.StartsOn, &t.EndsOn, &t.Branding, &t.Status, &t.PublishedAt, &t.CreatedAt, &t.EventCount,
+		&t.StartsOn, &t.EndsOn, &t.Timezone, &t.Branding, &t.Status, &t.PublishedAt, &t.CreatedAt, &t.EventCount,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -233,6 +252,7 @@ type CreateInput struct {
 	Location    *string
 	StartsOn    *time.Time
 	EndsOn      *time.Time
+	Timezone    string
 	Branding    map[string]any
 }
 
@@ -242,5 +262,6 @@ type UpdateInput struct {
 	Location    *string
 	StartsOn    *time.Time
 	EndsOn      *time.Time
+	Timezone    *string
 	Branding    map[string]any
 }

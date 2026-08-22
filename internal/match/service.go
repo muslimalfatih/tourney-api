@@ -3,6 +3,7 @@ package match
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -10,21 +11,42 @@ import (
 	"github.com/muslimalfatih/laga-api/internal/draw"
 )
 
+// InvalidScoreError carries the structured 422 payload for an illegal score
+// submission or scoring-config write.
+type InvalidScoreError struct {
+	Violations []Violation
+}
+
+func (e *InvalidScoreError) Error() string {
+	return fmt.Sprintf("invalid score: %d violation(s)", len(e.Violations))
+}
+
 var (
 	ErrForbidden = errors.New("not permitted")
-	ErrNoScores  = errors.New("at least one set is required")
-	ErrNoWinner  = errors.New("scores do not determine a winner")
+	// ErrCompletedImmutable guards the status endpoint: reopening a completed
+	// match must go through the score-correction transaction, not a bare
+	// status flip that would leave stale downstream state unaudited.
+	ErrCompletedImmutable = errors.New("completed matches are reopened via a score correction, not a status change")
 )
 
 // ScoreRequest is the organizer's score submission. complete=true finalizes the
 // match, computes the winner from the sets, and advances the bracket.
+// ScoreRequest is a score submission or correction. Completion is one of
+// incomplete | normal | walkover | retired | cancelled (see scoring.go).
+// WinnerSlot (1|2) is required for walkover/retired — those winners cannot be
+// derived — and forbidden otherwise. Sets may be empty only for walkover and
+// cancelled.
 type ScoreRequest struct {
-	Sets     []SetScore `json:"sets" binding:"required"`
-	Complete bool       `json:"complete"`
+	Sets       []SetScore `json:"sets"`
+	Completion string     `json:"completion" binding:"required"`
+	WinnerSlot int        `json:"winner_slot"`
 }
 
+// StatusRequest flips scheduling state only. 'completed' is deliberately not
+// accepted here — a decided result must come through the score endpoint,
+// which validates it and owns progression + audit.
 type StatusRequest struct {
-	Status string `json:"status" binding:"required,oneof=scheduled live completed"`
+	Status string `json:"status" binding:"required,oneof=scheduled live"`
 }
 
 type Service struct {
@@ -44,53 +66,84 @@ func (s *Service) ListForEvent(ctx context.Context, eventID uuid.UUID) ([]Match,
 	return s.repo.ListByEvent(ctx, eventID)
 }
 
-// SlugForMatch returns the SSE topic (tournament slug) for a match.
-func (s *Service) SlugForMatch(ctx context.Context, matchID uuid.UUID) (string, error) {
-	_, slug, err := s.repo.EventOrgAndSlug(ctx, matchID)
-	return slug, err
+// GetPublic is the anonymous read: it returns the match only when its
+// tournament is published AND its division is public. Everything else is a
+// plain not-found — a draft bracket's match UUIDs must not be probeable.
+func (s *Service) GetPublic(ctx context.Context, id uuid.UUID) (*Match, error) {
+	_, _, _, published, eventPublic, err := s.repo.EventOrgAndSlug(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !published || !eventPublic {
+		return nil, ErrNotFound
+	}
+	return s.repo.Get(ctx, id)
 }
 
 // SubmitScore authorizes, computes the winner (when completing), persists, and
 // advances the bracket. Returns the refreshed match + the tournament slug for
 // SSE broadcast.
-func (s *Service) SubmitScore(ctx context.Context, matchID uuid.UUID, orgID *uuid.UUID, req ScoreRequest) (*Match, string, error) {
-	ownerOrg, slug, err := s.repo.EventOrgAndSlug(ctx, matchID)
+// The returned topic is empty when the result must NOT be broadcast on the
+// public stream (draft tournament, or hidden division) — the handler skips
+// hub.Publish for an empty topic. Persisting still happens; only the public
+// broadcast is suppressed.
+//
+// actor is the authenticated user, recorded on the correction's audit entry.
+func (s *Service) SubmitScore(ctx context.Context, matchID, actor uuid.UUID, orgID *uuid.UUID, req ScoreRequest) (*Match, string, error) {
+	ownerOrg, tournamentID, slug, published, eventPublic, err := s.repo.EventOrgAndSlug(ctx, matchID)
 	if err != nil {
 		return nil, "", err
 	}
 	if orgID != nil && ownerOrg != *orgID {
 		return nil, "", ErrForbidden
 	}
-	if len(req.Sets) == 0 {
-		return nil, "", ErrNoScores
+	topic := ""
+	if published && eventPublic {
+		topic = slug
+	}
+	// Validation happens BEFORE the transaction: an illegal submission writes
+	// nothing and broadcasts nothing.
+	cfg, cfgViolations := ParseScoringConfig(nil) // replaced below when config loads
+	raw, err := s.repo.ScoringForMatch(ctx, matchID)
+	if err != nil {
+		return nil, "", err
+	}
+	cfg, cfgViolations = ParseScoringConfig(raw)
+	if len(cfgViolations) > 0 {
+		// A stored config can only be invalid if written before validation
+		// existed; fall back to defaults rather than blocking scoring.
+		cfg = DefaultScoringConfig()
+	}
+	winnerSlot, status, violations := ValidateScore(cfg, req.Sets, req.Completion, req.WinnerSlot)
+	if len(violations) > 0 {
+		return nil, "", &InvalidScoreError{Violations: violations}
 	}
 
 	current, err := s.repo.Get(ctx, matchID)
 	if err != nil {
 		return nil, "", err
 	}
-
-	status := "live"
 	var winnerID *uuid.UUID
-	if req.Complete {
-		status = "completed"
-		side := decideWinner(req.Sets)
-		if side == 0 {
-			return nil, "", ErrNoWinner
-		}
-		winnerID = participantForSlot(current, side)
+	if winnerSlot != 0 {
+		winnerID = participantForSlot(current, winnerSlot)
 		if winnerID == nil {
-			return nil, "", ErrNoWinner
+			return nil, "", &InvalidScoreError{Violations: []Violation{{
+				Field: "winner_slot", Rule: "winner.slot_empty",
+				Message: "the winning slot has no participant yet"}}}
 		}
 	}
 
-	if err := s.repo.SaveScore(ctx, matchID, req.Sets, status, winnerID, current.NextMatchID, current.NextSlot); err != nil {
+	if err := s.repo.SaveScore(ctx, SaveScoreInput{
+		MatchID: matchID, Sets: req.Sets, Status: status, WinnerID: winnerID,
+		Completion: req.Completion,
+		Actor:      actor, OrgID: ownerOrg, TournamentID: tournamentID,
+	}); err != nil {
 		return nil, "", err
 	}
 
-	// If this completed a group-knockout group stage, auto-fill the knockout.
+	// If this finished a group-knockout group stage, auto-fill the knockout.
 	// Best-effort: a failure here must not fail the score submission.
-	if req.Complete {
+	if decidedStatus(status) {
 		_, _ = s.draw.MaybeResolveGroups(ctx, matchID)
 	}
 
@@ -98,17 +151,33 @@ func (s *Service) SubmitScore(ctx context.Context, matchID uuid.UUID, orgID *uui
 	if err != nil {
 		return nil, "", err
 	}
-	return updated, slug, nil
+	return updated, topic, nil
 }
 
-// SetStatus authorizes and updates a match's status (e.g. mark live).
+// SetStatus authorizes and updates a match's status (e.g. mark live). Topic
+// semantics match SubmitScore: empty = do not broadcast publicly.
 func (s *Service) SetStatus(ctx context.Context, matchID uuid.UUID, orgID *uuid.UUID, req StatusRequest) (*Match, string, error) {
-	ownerOrg, slug, err := s.repo.EventOrgAndSlug(ctx, matchID)
+	ownerOrg, _, slug, published, eventPublic, err := s.repo.EventOrgAndSlug(ctx, matchID)
 	if err != nil {
 		return nil, "", err
 	}
 	if orgID != nil && ownerOrg != *orgID {
 		return nil, "", ErrForbidden
+	}
+	topic := ""
+	if published && eventPublic {
+		topic = slug
+	}
+	// A completed match cannot be quietly demoted through the status endpoint —
+	// that path bypasses the correction transaction (downstream rebuild, group
+	// re-resolution, audit). Reopen via a score correction instead, which walks
+	// the whole flow.
+	current, err := s.repo.Get(ctx, matchID)
+	if err != nil {
+		return nil, "", err
+	}
+	if decidedStatus(current.Status) {
+		return nil, "", ErrCompletedImmutable
 	}
 	if err := s.repo.SetStatus(ctx, matchID, req.Status); err != nil {
 		return nil, "", err
@@ -117,39 +186,7 @@ func (s *Service) SetStatus(ctx context.Context, matchID uuid.UUID, orgID *uuid.
 	if err != nil {
 		return nil, "", err
 	}
-	return m, slug, nil
-}
-
-// decideWinner counts sets won by each side (tennis: most sets wins; a set is
-// won by whoever has more games, tiebreak breaks equal games). Returns 1, 2, or
-// 0 (undecided/tie).
-func decideWinner(sets []SetScore) int {
-	p1, p2 := 0, 0
-	for _, s := range sets {
-		switch {
-		case s.P1Games > s.P2Games:
-			p1++
-		case s.P2Games > s.P1Games:
-			p2++
-		default:
-			// equal games → decide by tiebreak if present
-			if s.P1Tiebreak != nil && s.P2Tiebreak != nil {
-				if *s.P1Tiebreak > *s.P2Tiebreak {
-					p1++
-				} else if *s.P2Tiebreak > *s.P1Tiebreak {
-					p2++
-				}
-			}
-		}
-	}
-	switch {
-	case p1 > p2:
-		return 1
-	case p2 > p1:
-		return 2
-	default:
-		return 0
-	}
+	return m, topic, nil
 }
 
 // participantForSlot returns the participant id occupying a slot (1 or 2).

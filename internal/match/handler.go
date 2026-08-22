@@ -5,6 +5,7 @@ package match
 
 import (
 	"errors"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -47,7 +48,7 @@ func (h *Handler) getPublic(c *gin.Context) {
 		server.Error(c, server.ErrBadRequest("invalid match id"))
 		return
 	}
-	m, err := h.svc.Get(c.Request.Context(), id)
+	m, err := h.svc.GetPublic(c.Request.Context(), id)
 	if errors.Is(err, ErrNotFound) {
 		server.Error(c, server.ErrNotFound("match not found"))
 		return
@@ -89,11 +90,15 @@ func (h *Handler) updateScore(c *gin.Context) {
 		server.Error(c, server.ErrValidation("invalid score payload"))
 		return
 	}
-	m, slug, err := h.svc.SubmitScore(c.Request.Context(), id, orgScope(c), req)
+	m, slug, err := h.svc.SubmitScore(c.Request.Context(), id, middleware.UserID(c), orgScope(c), req)
 	if handled := respondErr(c, err); handled {
 		return
 	}
-	h.hub.Publish(slug, realtime.Event{Name: "match.score", Data: m})
+	// Empty slug = draft tournament or hidden division; persist but never
+	// broadcast on the public stream (see Service.SubmitScore).
+	if slug != "" {
+		h.hub.Publish(slug, realtime.Event{Name: "match.score", Data: m})
+	}
 	server.OK(c, m)
 }
 
@@ -112,7 +117,9 @@ func (h *Handler) updateStatus(c *gin.Context) {
 	if handled := respondErr(c, err); handled {
 		return
 	}
-	h.hub.Publish(slug, realtime.Event{Name: "match.status", Data: m})
+	if slug != "" {
+		h.hub.Publish(slug, realtime.Event{Name: "match.status", Data: m})
+	}
 	server.OK(c, m)
 }
 
@@ -124,10 +131,25 @@ func respondErr(c *gin.Context, err error) bool {
 		server.Error(c, server.ErrNotFound("match not found"))
 	case errors.Is(err, ErrForbidden):
 		server.Error(c, server.ErrForbidden(""))
-	case errors.Is(err, ErrNoScores):
-		server.Error(c, server.ErrValidation("at least one set is required"))
-	case errors.Is(err, ErrNoWinner):
-		server.Error(c, server.ErrValidation("scores do not determine a winner"))
+	case func() bool { var iv *InvalidScoreError; return errors.As(err, &iv) }():
+		var iv *InvalidScoreError
+		errors.As(err, &iv)
+		server.Error(c, (&server.AppError{
+			Status: http.StatusUnprocessableEntity, Code: "invalid_score",
+			Message: "the submitted score is not a legal result for this division",
+		}).WithDetails(map[string]any{"violations": iv.Violations}))
+	case errors.Is(err, ErrCompletedImmutable):
+		server.Error(c, &server.AppError{
+			Status: http.StatusConflict, Code: "completed_immutable",
+			Message: ErrCompletedImmutable.Error(),
+		})
+	case func() bool { var dl *DownstreamLockedError; return errors.As(err, &dl) }():
+		var dl *DownstreamLockedError
+		errors.As(err, &dl)
+		server.Error(c, (&server.AppError{
+			Status: http.StatusConflict, Code: "downstream_phase_locked",
+			Message: "downstream matches have started; correct or reset them before changing this result",
+		}).WithDetails(map[string]any{"locked": dl.Locked}))
 	default:
 		server.Error(c, server.ErrInternal(""))
 	}

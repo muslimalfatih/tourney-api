@@ -2,10 +2,13 @@ package event
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/muslimalfatih/laga-api/internal/match"
 )
 
 // CreateEventRequest is the organizer payload for adding a division.
@@ -24,11 +27,12 @@ type CreateEventRequest struct {
 // value is applied. For category/public_display_name a present "" clears the
 // column to NULL (uncategorised / falls back to name).
 type UpdateEventRequest struct {
-	Category          *string `json:"category"`
-	Gender            *string `json:"gender" binding:"omitempty,oneof=men women mixed"`
-	IsPublic          *bool   `json:"is_public"`
-	PublicDisplayName *string `json:"public_display_name"`
-	PublicOrder       *int    `json:"public_order"`
+	Category          *string         `json:"category"`
+	Gender            *string         `json:"gender" binding:"omitempty,oneof=men women mixed"`
+	IsPublic          *bool           `json:"is_public"`
+	PublicDisplayName *string         `json:"public_display_name"`
+	PublicOrder       *int            `json:"public_order"`
+	Scoring           json.RawMessage `json:"scoring"`
 }
 
 type Service struct {
@@ -125,6 +129,14 @@ func (s *Service) UpdatePublicSettings(ctx context.Context, id uuid.UUID, orgID 
 	}
 	if err := s.repo.tournamentOwned(ctx, ev.TournamentID, orgID); err != nil {
 		return nil, err
+	}
+	// Scoring config is validated here — the one write path — so an invalid
+	// document can never be stored (match.ValidateScore still defends in
+	// depth with a default fallback for pre-validation rows).
+	if in.Scoring != nil {
+		if _, violations := match.ParseScoringConfig([]byte(*in.Scoring)); len(violations) > 0 {
+			return nil, &match.InvalidScoreError{Violations: violations}
+		}
 	}
 	return s.repo.Update(ctx, id, in)
 }

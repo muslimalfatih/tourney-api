@@ -28,6 +28,7 @@ type CreateTournamentRequest struct {
 	Location    string         `json:"location"`
 	StartsOn    string         `json:"starts_on"` // YYYY-MM-DD
 	EndsOn      string         `json:"ends_on"`
+	Timezone    string         `json:"timezone"` // IANA name; "" -> Asia/Makassar
 	Branding    map[string]any `json:"branding"`
 }
 
@@ -38,7 +39,34 @@ type UpdateTournamentRequest struct {
 	Location    *string        `json:"location"`
 	StartsOn    *string        `json:"starts_on"`
 	EndsOn      *string        `json:"ends_on"`
+	Timezone    *string        `json:"timezone"`
 	Branding    map[string]any `json:"branding"`
+}
+
+// DefaultTimezone is the platform default for new tournaments (Bali/WITA).
+const DefaultTimezone = "Asia/Makassar"
+
+// InvalidTimezoneError reports a timezone value time.LoadLocation rejects.
+// The handler renders it as 422 invalid_timezone with {field, value} details.
+type InvalidTimezoneError struct {
+	Value string
+}
+
+func (e *InvalidTimezoneError) Error() string {
+	return "unknown IANA timezone: " + e.Value
+}
+
+// validateTimezone accepts exactly the IANA zone names the Go runtime can
+// load. "" and "Local" are rejected: the stored value must be an explicit,
+// portable zone — never the server's own locale.
+func validateTimezone(tz string) error {
+	if tz == "" || tz == "Local" {
+		return &InvalidTimezoneError{Value: tz}
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return &InvalidTimezoneError{Value: tz}
+	}
+	return nil
 }
 
 // Service holds tournament business logic.
@@ -53,6 +81,12 @@ func NewService(pool *pgxpool.Pool) *Service {
 
 func (s *Service) List(ctx context.Context, orgID uuid.UUID, limit, offset int) ([]Tournament, int64, error) {
 	return s.repo.ListByOrg(ctx, orgID, limit, offset)
+}
+
+// IsPublishedSlug — see Repository.IsPublishedSlug. Exposed for the realtime
+// stream gate, which lives outside this package.
+func (s *Service) IsPublishedSlug(ctx context.Context, slug string) (bool, error) {
+	return s.repo.IsPublishedSlug(ctx, slug)
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID, orgID *uuid.UUID) (*Tournament, error) {
@@ -96,6 +130,13 @@ func (s *Service) Create(ctx context.Context, orgID uuid.UUID, req CreateTournam
 		return nil, fmt.Errorf("ends_on: %w", err)
 	}
 
+	tz := strings.TrimSpace(req.Timezone)
+	if tz == "" {
+		tz = DefaultTimezone
+	} else if err := validateTimezone(tz); err != nil {
+		return nil, err
+	}
+
 	in := CreateInput{
 		OrgID:       orgID,
 		Name:        strings.TrimSpace(req.Name),
@@ -105,6 +146,7 @@ func (s *Service) Create(ctx context.Context, orgID uuid.UUID, req CreateTournam
 		Location:    strPtr(req.Location),
 		StartsOn:    starts,
 		EndsOn:      ends,
+		Timezone:    tz,
 		Branding:    req.Branding,
 	}
 	return s.repo.Create(ctx, in)
@@ -112,6 +154,13 @@ func (s *Service) Create(ctx context.Context, orgID uuid.UUID, req CreateTournam
 
 func (s *Service) Update(ctx context.Context, id uuid.UUID, orgID *uuid.UUID, req UpdateTournamentRequest) (*Tournament, error) {
 	in := UpdateInput{Name: req.Name, Description: req.Description, Location: req.Location, Branding: req.Branding}
+	if req.Timezone != nil {
+		tz := strings.TrimSpace(*req.Timezone)
+		if err := validateTimezone(tz); err != nil {
+			return nil, err
+		}
+		in.Timezone = &tz
+	}
 	if req.StartsOn != nil {
 		t, err := parseDate(*req.StartsOn)
 		if err != nil {

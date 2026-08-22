@@ -5,6 +5,7 @@ package tournament
 
 import (
 	"errors"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -102,6 +103,9 @@ func (h *Handler) create(c *gin.Context) {
 		server.Error(c, server.ErrConflict("that slug is already in use"))
 		return
 	}
+	if handleTimezoneErr(c, err) {
+		return
+	}
 	if err != nil {
 		server.Error(c, server.ErrValidation(err.Error()))
 		return
@@ -143,11 +147,28 @@ func (h *Handler) update(c *gin.Context) {
 		server.Error(c, server.ErrNotFound("tournament not found"))
 		return
 	}
+	if handleTimezoneErr(c, err) {
+		return
+	}
 	if err != nil {
 		server.Error(c, server.ErrValidation(err.Error()))
 		return
 	}
 	server.OK(c, t)
+}
+
+// handleTimezoneErr renders the Phase 3.6 invalid-timezone contract:
+// 422 {"error":{"code":"invalid_timezone","details":{"field":"timezone","value":...}}}
+func handleTimezoneErr(c *gin.Context, err error) bool {
+	var tzErr *InvalidTimezoneError
+	if !errors.As(err, &tzErr) {
+		return false
+	}
+	server.Error(c, (&server.AppError{
+		Status: http.StatusUnprocessableEntity, Code: "invalid_timezone",
+		Message: "timezone must be a valid IANA zone name (e.g. Asia/Makassar)",
+	}).WithDetails(gin.H{"field": "timezone", "value": tzErr.Value}))
+	return true
 }
 
 func (h *Handler) publish(c *gin.Context) {

@@ -4,11 +4,13 @@ package event
 
 import (
 	"errors"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/muslimalfatih/laga-api/internal/draw"
+	"github.com/muslimalfatih/laga-api/internal/match"
 	"github.com/muslimalfatih/laga-api/internal/server"
 	"github.com/muslimalfatih/laga-api/internal/server/middleware"
 )
@@ -39,6 +41,7 @@ func (h *Handler) RegisterOrganizer(rg *gin.RouterGroup) {
 	// group_knockout by assigning teams to groups then building.
 	rg.POST("/events/:id/bracket/build", h.buildBracket)
 	rg.POST("/events/:id/matches", h.addManualMatch)
+	rg.POST("/events/:id/matches/generate", h.generateFixtures)
 	rg.DELETE("/matches/:id", h.deleteManualMatch)
 	rg.PUT("/events/:id/groups", h.setGroups)
 	rg.POST("/events/:id/resolve-groups", h.resolveGroups)
@@ -154,9 +157,23 @@ func (h *Handler) update(c *gin.Context) {
 		PublicDisplayName: req.PublicDisplayName,
 		PublicOrder:       req.PublicOrder,
 	}
+	// json.RawMessage distinguishes absent (nil → unchanged) from present; a
+	// present document is validated in the service before it reaches SQL.
+	if req.Scoring != nil {
+		raw := string(req.Scoring)
+		in.Scoring = &raw
+	}
 	ev, err := h.svc.UpdatePublicSettings(c.Request.Context(), id, orgScope(c), in)
 	if errors.Is(err, ErrNotFound) {
 		server.Error(c, server.ErrNotFound("event not found"))
+		return
+	}
+	var iv *match.InvalidScoreError
+	if errors.As(err, &iv) {
+		server.Error(c, (&server.AppError{
+			Status: http.StatusUnprocessableEntity, Code: "invalid_scoring_config",
+			Message: "the scoring configuration is invalid",
+		}).WithDetails(map[string]any{"violations": iv.Violations}))
 		return
 	}
 	if err != nil {
@@ -234,6 +251,10 @@ func (h *Handler) addManualMatch(c *gin.Context) {
 	var req struct {
 		TeamAID string `json:"team_a_id" binding:"required"`
 		TeamBID string `json:"team_b_id" binding:"required"`
+		// AllowRematch acknowledges a duplicate_fixture 409 for a DECIDED prior
+		// fixture and creates the rematch anyway (audited). It never overrides
+		// an unplayed duplicate.
+		AllowRematch bool `json:"allow_rematch"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		server.Error(c, server.ErrValidation("both team ids are required"))
@@ -245,11 +266,27 @@ func (h *Handler) addManualMatch(c *gin.Context) {
 		server.Error(c, server.ErrValidation("invalid team id"))
 		return
 	}
-	mid, no, err := h.draw.AddManualMatch(c.Request.Context(), id, orgScope(c), a, b)
+	mid, no, err := h.draw.AddManualMatch(c.Request.Context(), id, orgScope(c),
+		middleware.UserID(c), a, b, req.AllowRematch)
 	if handled := manualErr(c, err); handled {
 		return
 	}
 	server.Created(c, gin.H{"id": mid, "match_no": no})
+}
+
+// generateFixtures fills in every missing round-robin pairing (idempotent —
+// existing fixtures for a pair are kept, only missing ones are created).
+func (h *Handler) generateFixtures(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		server.Error(c, server.ErrBadRequest("invalid event id"))
+		return
+	}
+	created, existing, err := h.draw.GenerateRoundRobinFixtures(c.Request.Context(), id, orgScope(c))
+	if handled := manualErr(c, err); handled {
+		return
+	}
+	server.OK(c, gin.H{"created": created, "existing": existing})
 }
 
 // deleteManualMatch removes one pending organizer-created fixture (round_robin).
@@ -306,9 +343,24 @@ func (h *Handler) setGroups(c *gin.Context) {
 
 // manualErr maps the manual-setup service errors to responses; true if handled.
 func manualErr(c *gin.Context, err error) bool {
+	var dup *draw.DuplicateFixtureError
 	switch {
 	case err == nil:
 		return false
+	case errors.As(err, &dup):
+		// Stable duplicate contract: the existing fixture rides in the details
+		// so the client can show it and (when rematchable) offer the explicit
+		// allow_rematch confirmation.
+		msg := "these teams already have an unplayed fixture"
+		if dup.Rematchable {
+			msg = "these teams already played; confirm to create a rematch"
+		}
+		server.Error(c, (&server.AppError{
+			Status: http.StatusConflict, Code: "duplicate_fixture", Message: msg,
+		}).WithDetails(gin.H{
+			"match_id": dup.MatchID, "match_no": dup.MatchNo,
+			"status": dup.Status, "rematchable": dup.Rematchable,
+		}))
 	case errors.Is(err, draw.ErrNotFound):
 		server.Error(c, server.ErrNotFound("not found"))
 	case errors.Is(err, draw.ErrForbidden):

@@ -110,13 +110,24 @@ func knockoutSeedLabels(numGroups, advance int) []string {
 	return labels
 }
 
-// buildKnockoutFromLabels builds a single-elim bracket where the first-round
-// slots are labelled feeds (no participant ids yet).
+// buildKnockoutFromLabels is the legacy label-only entry point, kept for the
+// (currently unreachable) auto generator and its tests. The live path uses
+// buildKnockoutFromSlots with typed slots.
 func buildKnockoutFromLabels(labels []string) []Match {
-	size := nextPowerOfTwo(len(labels))
-	// pad with byes
-	for len(labels) < size {
-		labels = append(labels, "")
+	slots := make([]Slot, len(labels))
+	for i, l := range labels {
+		slots[i] = labelSlot(l)
+	}
+	return buildKnockoutFromSlots(slots)
+}
+
+// buildKnockoutFromSlots builds a single-elim bracket whose first-round slots
+// are the given feeds (typed group placements, fixed entries, or byes — the
+// pad to a power of two is byes).
+func buildKnockoutFromSlots(entries []Slot) []Match {
+	size := nextPowerOfTwo(len(entries))
+	for len(entries) < size {
+		entries = append(entries, Slot{IsBye: true})
 	}
 	rounds := log2(size)
 
@@ -126,8 +137,8 @@ func buildKnockoutFromLabels(labels []string) []Match {
 		matches = append(matches, Match{
 			Round:        1,
 			MatchInRound: i,
-			Slot1:        labelSlot(labels[i*2]),
-			Slot2:        labelSlot(labels[i*2+1]),
+			Slot1:        entries[i*2],
+			Slot2:        entries[i*2+1],
 		})
 	}
 	prevStart, prevCount := 0, firstRoundCount

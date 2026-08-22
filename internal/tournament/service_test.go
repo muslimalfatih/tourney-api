@@ -40,3 +40,18 @@ func TestParseDate(t *testing.T) {
 		t.Error("invalid date format should error")
 	}
 }
+
+func TestValidateTimezone(t *testing.T) {
+	valid := []string{"Asia/Makassar", "Asia/Jakarta", "Australia/Sydney", "America/New_York", "UTC", "Europe/Paris"}
+	for _, tz := range valid {
+		if err := validateTimezone(tz); err != nil {
+			t.Errorf("validateTimezone(%q) = %v, want nil", tz, err)
+		}
+	}
+	invalid := []string{"", "Local", "Bali", "Asia/Denpasar", "GMT+8", "Mars/Olympus", "asia/makassar "}
+	for _, tz := range invalid {
+		if err := validateTimezone(tz); err == nil {
+			t.Errorf("validateTimezone(%q) = nil, want error", tz)
+		}
+	}
+}

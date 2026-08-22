@@ -17,12 +17,20 @@ type Entry struct {
 
 // Slot is a position in a match. Exactly one of ParticipantID / IsBye is set
 // once the draw is placed; both nil means the slot is filled by the winner of a
-// prior match (a "feed"). SourceLabel describes an unresolved feed for display
-// (e.g. "Winner Group A") until the group stage completes.
+// prior match (a "feed").
+//
+// SourceLabel is DISPLAY TEXT only (e.g. "Winner Group A"). The machine truth
+// for a group-placement feed is SourceGroupIdx (index into the draw's group
+// specs) + SourceRank (1-based standing) — resolution reads these, never the
+// label, so custom group names and ranks past 2 resolve correctly. The two
+// ints are only meaningful when SourceLabel is set; their zero values are not
+// a reference to group 0.
 type Slot struct {
-	ParticipantID *uuid.UUID
-	IsBye         bool
-	SourceLabel   string
+	ParticipantID  *uuid.UUID
+	IsBye          bool
+	SourceLabel    string
+	SourceGroupIdx int
+	SourceRank     int
 }
 
 // Match is a generated match in the bracket. NextMatchIndex/NextSlot describe

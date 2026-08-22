@@ -41,6 +41,9 @@ vet: ## Run go vet
 
 lint: vet ## Alias for vet (add golangci-lint later if desired)
 
+test-integration: ## Run DB-backed integration tests (TEST_DATABASE_URL or DATABASE_URL; migrations must be applied)
+	go test -tags integration ./internal/inttest/... -count=1 -timeout 180s -v
+
 test: ## Run tests
 	go test ./...
 
