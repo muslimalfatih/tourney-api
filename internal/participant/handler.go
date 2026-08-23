@@ -9,8 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/muslimalfatih/laga-api/internal/server"
-	"github.com/muslimalfatih/laga-api/internal/server/middleware"
+	"github.com/muslimalfatih/tourney-api/internal/server"
+	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 )
 
 type Handler struct {

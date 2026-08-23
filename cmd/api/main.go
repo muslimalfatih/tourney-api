@@ -1,4 +1,4 @@
-// Command api is the laga-api entrypoint. It stays thin: load config, open the
+// Command api is the tourney-api entrypoint. It stays thin: load config, open the
 // database, construct each module, wire the router, and run until interrupted.
 // All construction lives here so the dependency graph is visible in one place.
 package main
@@ -12,20 +12,20 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/muslimalfatih/laga-api/internal/audit"
-	"github.com/muslimalfatih/laga-api/internal/auth"
-	"github.com/muslimalfatih/laga-api/internal/config"
-	"github.com/muslimalfatih/laga-api/internal/draw"
-	"github.com/muslimalfatih/laga-api/internal/event"
-	"github.com/muslimalfatih/laga-api/internal/match"
-	"github.com/muslimalfatih/laga-api/internal/participant"
-	"github.com/muslimalfatih/laga-api/internal/platform"
-	"github.com/muslimalfatih/laga-api/internal/realtime"
-	"github.com/muslimalfatih/laga-api/internal/schedule"
-	"github.com/muslimalfatih/laga-api/internal/server"
-	"github.com/muslimalfatih/laga-api/internal/server/middleware"
-	"github.com/muslimalfatih/laga-api/internal/storage/postgres"
-	"github.com/muslimalfatih/laga-api/internal/tournament"
+	"github.com/muslimalfatih/tourney-api/internal/audit"
+	"github.com/muslimalfatih/tourney-api/internal/auth"
+	"github.com/muslimalfatih/tourney-api/internal/config"
+	"github.com/muslimalfatih/tourney-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/event"
+	"github.com/muslimalfatih/tourney-api/internal/match"
+	"github.com/muslimalfatih/tourney-api/internal/participant"
+	"github.com/muslimalfatih/tourney-api/internal/platform"
+	"github.com/muslimalfatih/tourney-api/internal/realtime"
+	"github.com/muslimalfatih/tourney-api/internal/schedule"
+	"github.com/muslimalfatih/tourney-api/internal/server"
+	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
+	"github.com/muslimalfatih/tourney-api/internal/storage/postgres"
+	"github.com/muslimalfatih/tourney-api/internal/tournament"
 )
 
 func main() {

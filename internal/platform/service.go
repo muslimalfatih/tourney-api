@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/audit"
-	"github.com/muslimalfatih/laga-api/internal/auth"
+	"github.com/muslimalfatih/tourney-api/internal/audit"
+	"github.com/muslimalfatih/tourney-api/internal/auth"
 )
 
 // CreateOrgRequest creates an organization and its first organizer account.

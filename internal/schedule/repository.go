@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/audit"
+	"github.com/muslimalfatih/tourney-api/internal/audit"
 )
 
 var (

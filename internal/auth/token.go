@@ -7,7 +7,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
-	"github.com/muslimalfatih/laga-api/internal/server/middleware"
+	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 )
 
 // TokenService issues and verifies JWT access and refresh tokens. Access tokens

@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/draw"
 )
 
 // InvalidScoreError carries the structured 422 payload for an illegal score

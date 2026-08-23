@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/match"
+	"github.com/muslimalfatih/tourney-api/internal/match"
 )
 
 // CreateEventRequest is the organizer payload for adding a division.

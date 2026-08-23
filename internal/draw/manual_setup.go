@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/muslimalfatih/laga-api/internal/audit"
+	"github.com/muslimalfatih/tourney-api/internal/audit"
 )
 
 var ErrBadRequest = errors.New("invalid request")

@@ -15,8 +15,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/config"
-	"github.com/muslimalfatih/laga-api/internal/server/middleware"
+	"github.com/muslimalfatih/tourney-api/internal/config"
+	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 )
 
 // Deps carries everything the router needs to mount routes. It is populated in

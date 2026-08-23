@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/muslimalfatih/laga-api/internal/server"
-	"github.com/muslimalfatih/laga-api/internal/server/middleware"
+	"github.com/muslimalfatih/tourney-api/internal/server"
+	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 )
 
 // Handler exposes the auth endpoints. It returns tokens in the JSON body; the

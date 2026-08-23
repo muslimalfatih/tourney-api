@@ -1,4 +1,4 @@
-# Container image for the laga-api service, deployed to Fly as `tourney-api`.
+# Container image for the tourney-api service, deployed to Fly as `tourney-api`.
 #
 # Two binaries ship in one image: the API server (entrypoint) and the goose
 # migrator, which fly.toml runs as a release_command before each deploy goes
@@ -24,8 +24,8 @@ FROM alpine:3.21
 # ca-certificates: TLS to Supabase. tzdata: tournament timezones (Phase 3.6)
 # resolve through time.LoadLocation, which reads the system zone database.
 RUN apk add --no-cache ca-certificates tzdata && \
-    adduser -D -u 10001 laga
-USER laga
+    adduser -D -u 10001 tourney
+USER tourney
 WORKDIR /app
 
 COPY --from=build /out/api /app/api

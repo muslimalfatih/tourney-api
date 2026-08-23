@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: Laga API
+  title: Tourney API
   version: 0.1.0
   description: >
     White-label tennis tournament platform API. This spec is the canonical
-    contract between laga-api and laga-web. Frontend types are generated from
+    contract between tourney-api and tourney-web. Frontend types are generated from
     it; backend responses are validated against it.
 servers:
   - url: http://localhost:8080/api/v1

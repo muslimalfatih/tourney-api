@@ -1,7 +1,7 @@
 -- +goose Up
 -- Enable Row Level Security on every public table (Supabase Security Advisor:
 -- "RLS Disabled in Public", one finding per table). No policies are added —
--- laga-api is the only writer/reader and connects as `postgres`, which carries
+-- tourney-api is the only writer/reader and connects as `postgres`, which carries
 -- BYPASSRLS, so the API's behavior is unchanged. What this closes: the
 -- Supabase anon/authenticated keys (public by design) currently have no RLS
 -- check at all should this project's Data API/PostgREST ever be reachable

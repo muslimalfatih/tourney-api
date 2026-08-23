@@ -19,7 +19,7 @@ import (
 // shadowed by the schedule route and become unreachable.
 //
 // MUST be updated whenever a tournament-level route is added on the web side
-// (laga-web src/routes/(public)/tournaments/[slug]/). There is no compile-time
+// (tourney-web src/routes/(public)/tournaments/[slug]/). There is no compile-time
 // link between the two, so this list is the only thing preventing a silently
 // unreachable division.
 var reservedSlugs = map[string]bool{

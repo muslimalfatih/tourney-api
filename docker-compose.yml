@@ -1,22 +1,22 @@
 # Local Postgres for development as an alternative to Supabase. Point both
 # DATABASE_URL and MIGRATION_DATABASE_URL at this instance when working offline:
-#   postgresql://laga:laga@localhost:5432/laga?sslmode=disable
+#   postgresql://tourney:tourney@localhost:5432/tourney?sslmode=disable
 services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: laga
-      POSTGRES_PASSWORD: laga
-      POSTGRES_DB: laga
+      POSTGRES_USER: tourney
+      POSTGRES_PASSWORD: tourney
+      POSTGRES_DB: tourney
     ports:
       - "5432:5432"
     volumes:
-      - laga_pg:/var/lib/postgresql/data
+      - tourney_pg:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U laga"]
+      test: ["CMD-SHELL", "pg_isready -U tourney"]
       interval: 5s
       timeout: 5s
       retries: 5
 
 volumes:
-  laga_pg:
+  tourney_pg:

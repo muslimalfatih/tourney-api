@@ -36,8 +36,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/config"
-	"github.com/muslimalfatih/laga-api/internal/storage/postgres"
+	"github.com/muslimalfatih/tourney-api/internal/config"
+	"github.com/muslimalfatih/tourney-api/internal/storage/postgres"
 )
 
 // womensEventID is the "Women's Doubles Beginner++" division of renon-cup-2026.

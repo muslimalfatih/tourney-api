@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/audit"
-	"github.com/muslimalfatih/laga-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/audit"
+	"github.com/muslimalfatih/tourney-api/internal/draw"
 )
 
 var ErrNotFound = errors.New("match not found")

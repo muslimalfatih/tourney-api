@@ -19,9 +19,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/auth"
-	"github.com/muslimalfatih/laga-api/internal/config"
-	"github.com/muslimalfatih/laga-api/internal/storage/postgres"
+	"github.com/muslimalfatih/tourney-api/internal/auth"
+	"github.com/muslimalfatih/tourney-api/internal/config"
+	"github.com/muslimalfatih/tourney-api/internal/storage/postgres"
 )
 
 func main() {
@@ -66,7 +66,10 @@ func run() error {
 	// 2. A default organization + organizer account so the M1 organizer flows
 	//    are usable before the super-admin org-management screens exist (M4).
 	//    Controlled by SEED_ORG_* env; skipped if the organizer email is unset.
-	orgName := envDefault("SEED_ORG_NAME", "Laga Demo Org")
+	orgName := envDefault("SEED_ORG_NAME", "Tourney Demo Org")
+	// The slug stays "laga-demo" after the tourney-* rename: it keys the demo
+	// org row that already exists in the database. Changing it seeds a SECOND
+	// org instead of updating this one — rename the row first if you change it.
 	orgSlug := envDefault("SEED_ORG_SLUG", "laga-demo")
 	orgEmail := os.Getenv("SEED_ORGANIZER_EMAIL")
 	orgPass := os.Getenv("SEED_ORGANIZER_PASSWORD")

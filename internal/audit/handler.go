@@ -3,7 +3,7 @@ package audit
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/muslimalfatih/laga-api/internal/server"
+	"github.com/muslimalfatih/tourney-api/internal/server"
 )
 
 type Handler struct {

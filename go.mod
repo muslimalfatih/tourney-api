@@ -1,4 +1,4 @@
-module github.com/muslimalfatih/laga-api
+module github.com/muslimalfatih/tourney-api
 
 go 1.25.7
 

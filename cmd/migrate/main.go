@@ -18,8 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/stdlib" // database/sql driver for pgx
 	"github.com/pressly/goose/v3"
 
-	"github.com/muslimalfatih/laga-api/db"
-	"github.com/muslimalfatih/laga-api/internal/config"
+	"github.com/muslimalfatih/tourney-api/db"
+	"github.com/muslimalfatih/tourney-api/internal/config"
 )
 
 func main() {

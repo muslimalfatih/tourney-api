@@ -43,12 +43,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/muslimalfatih/laga-api/internal/draw"
-	"github.com/muslimalfatih/laga-api/internal/event"
-	"github.com/muslimalfatih/laga-api/internal/match"
-	"github.com/muslimalfatih/laga-api/internal/participant"
-	"github.com/muslimalfatih/laga-api/internal/schedule"
-	"github.com/muslimalfatih/laga-api/internal/tournament"
+	"github.com/muslimalfatih/tourney-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/event"
+	"github.com/muslimalfatih/tourney-api/internal/match"
+	"github.com/muslimalfatih/tourney-api/internal/participant"
+	"github.com/muslimalfatih/tourney-api/internal/schedule"
+	"github.com/muslimalfatih/tourney-api/internal/tournament"
 )
 
 const renonSlug = "renon-cup-2026"
@@ -130,6 +130,7 @@ func seedRenonCup(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	// Org + organizer come from the bootstrap seed that just ran.
+	// 'laga-demo' is the live row's slug — see the note in cmd/seed/main.go.
 	err := pool.QueryRow(ctx, `SELECT id FROM organizations WHERE slug = 'laga-demo'`).Scan(&s.orgID)
 	if err != nil {
 		return fmt.Errorf("renon seed: demo org missing (run the base seed first): %w", err)
