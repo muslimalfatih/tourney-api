@@ -1,12 +1,14 @@
-# laga-api on Fly.io.
+# tourney-api on Fly.io — the laga-api service.
 #
-# Rename `app` to whatever `fly launch` reserves for you.
+# The app name matches the intended custom domain (api.tourney.social). Fly app
+# names are permanent, so put the domain in front (`fly certs add`) and clients
+# never depend on this name anyway.
 #
 # Region: Singapore, close to the Indonesian audience. The Supabase project is
 # in Sydney, so each DB round-trip crosses ~90ms — if API latency ever becomes
 # the complaint, moving this to 'syd' (next to the database) is the first lever,
 # since a request makes several DB calls but only one trip to the viewer.
-app = 'laga-api'
+app = 'tourney-api'
 primary_region = 'sin'
 
 [build]

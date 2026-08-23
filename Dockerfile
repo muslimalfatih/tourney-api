@@ -1,4 +1,4 @@
-# laga-api container image for Fly.io.
+# Container image for the laga-api service, deployed to Fly as `tourney-api`.
 #
 # Two binaries ship in one image: the API server (entrypoint) and the goose
 # migrator, which fly.toml runs as a release_command before each deploy goes
