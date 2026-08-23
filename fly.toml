@@ -1,0 +1,47 @@
+# laga-api on Fly.io.
+#
+# Rename `app` to whatever `fly launch` reserves for you.
+#
+# Region: Singapore, close to the Indonesian audience. The Supabase project is
+# in Sydney, so each DB round-trip crosses ~90ms — if API latency ever becomes
+# the complaint, moving this to 'syd' (next to the database) is the first lever,
+# since a request makes several DB calls but only one trip to the viewer.
+app = 'laga-api'
+primary_region = 'sin'
+
+[build]
+
+# Migrations run in a one-off machine before the new release takes traffic.
+# It reads MIGRATION_DATABASE_URL (session pooler, 5432) — set it as a secret.
+[deploy]
+  release_command = '/app/migrate up'
+
+[env]
+  APP_ENV = 'production'
+  PORT = '8080'
+  LOG_LEVEL = 'info'
+  # Supabase Free has a modest connection budget and this is PER MACHINE —
+  # raise deliberately, and only alongside the pooler's limits.
+  DB_MAX_CONNS = '8'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'suspend'
+  auto_start_machines = true
+  # The public pages hold an open SSE stream. Keeping one machine warm means a
+  # spectator never waits on a cold start to see the next point, and no stream
+  # is dropped just because traffic went quiet for a moment.
+  min_machines_running = 1
+  processes = ['app']
+
+  [[http_service.checks]]
+    grace_period = '10s'
+    interval = '30s'
+    method = 'GET'
+    timeout = '5s'
+    path = '/healthz'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'

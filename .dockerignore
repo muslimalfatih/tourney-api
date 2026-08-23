@@ -1,0 +1,15 @@
+# Keep the build context small — and keep secrets out of the image.
+.env
+.env.*
+!.env.example
+
+.git
+.github
+*.md
+Makefile
+
+# Local tooling / artifacts
+bin/
+tmp/
+*.test
+coverage.out
