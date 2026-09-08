@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,11 +14,12 @@ import (
 // web app is responsible for storing them in its httpOnly cookie and forwarding
 // the access token as a Bearer header on server-side API calls.
 type Handler struct {
-	svc *Service
+	svc      *Service
+	verifier middleware.TokenVerifier
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, verifier middleware.TokenVerifier) *Handler {
+	return &Handler{svc: svc, verifier: verifier}
 }
 
 // Register mounts the auth routes. verifier is passed so /me can sit behind the
@@ -102,11 +104,46 @@ func (h *Handler) refresh(c *gin.Context) {
 	})
 }
 
-// logout is a no-op server-side because tokens are stateless. The web app clears
-// its cookie. Kept as an endpoint so the contract has a logical logout call and
-// so a future token-denylist can hook in here without a frontend change.
+type logoutRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// logout revokes the caller's session server-side, so the tokens it issued stop
+// working at once rather than lingering for the rest of their TTL.
+//
+// It accepts either credential the caller might still hold: a refresh token in
+// the body, or a Bearer access token. The access token lasts 15 minutes while
+// the refresh cookie lasts 30 days, so requiring the former would leave anyone
+// idle for a quarter of an hour unable to sign out.
+//
+// It always returns 204. A sign-out that reports failure is a sign-out the user
+// will retry or, worse, assume worked; the button must never appear to fail.
 func (h *Handler) logout(c *gin.Context) {
+	var req logoutRequest
+	_ = c.ShouldBindJSON(&req)
+
+	if req.RefreshToken != "" {
+		if err := h.svc.LogoutByRefreshToken(c.Request.Context(), req.RefreshToken); err == nil {
+			server.NoContent(c)
+			return
+		}
+	}
+	// Fall back to the access token, if the caller sent one and it still
+	// resolves to a live session.
+	if claims, err := h.verifier.VerifyAccessToken(c.Request.Context(), bearerToken(c)); err == nil {
+		_ = h.svc.Logout(c.Request.Context(), claims.SessionID)
+	}
 	server.NoContent(c)
+}
+
+// bearerToken pulls the raw token out of an Authorization header, or "" if
+// there is not a well-formed one.
+func bearerToken(c *gin.Context) string {
+	parts := strings.SplitN(c.GetHeader("Authorization"), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return parts[1]
 }
 
 func (h *Handler) me(c *gin.Context) {

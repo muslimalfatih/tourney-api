@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -14,13 +15,20 @@ type Claims struct {
 	UserID uuid.UUID
 	Role   string
 	OrgID  *uuid.UUID
+	// SessionID is the auth_sessions row backing this token. Since 00013 a
+	// token is only as good as its session: the verifier resolves this on
+	// every request, which is what makes logout and suspension take effect
+	// immediately instead of whenever the access token happens to expire.
+	SessionID uuid.UUID
 }
 
 // TokenVerifier verifies a raw access token and returns its claims. The auth
 // package implements this; middleware depends on the interface so it does not
 // import the auth package (which would create an import cycle).
+// It takes a context because verification now touches the database to resolve
+// the session, not just the token's signature.
 type TokenVerifier interface {
-	VerifyAccessToken(raw string) (*Claims, error)
+	VerifyAccessToken(ctx context.Context, raw string) (*Claims, error)
 }
 
 // abortUnauthorized writes a 401 JSON envelope and stops the chain.
@@ -47,7 +55,7 @@ func Auth(verifier TokenVerifier) gin.HandlerFunc {
 			return
 		}
 
-		claims, err := verifier.VerifyAccessToken(parts[1])
+		claims, err := verifier.VerifyAccessToken(c.Request.Context(), parts[1])
 		if err != nil {
 			abortUnauthorized(c, "invalid or expired token")
 			return
@@ -55,6 +63,7 @@ func Auth(verifier TokenVerifier) gin.HandlerFunc {
 
 		c.Set(ctxUserID, claims.UserID)
 		c.Set(ctxUserRole, claims.Role)
+		c.Set(ctxSessionID, claims.SessionID)
 		if claims.OrgID != nil {
 			c.Set(ctxOrgID, *claims.OrgID)
 		}
@@ -66,6 +75,17 @@ func Auth(verifier TokenVerifier) gin.HandlerFunc {
 
 func UserID(c *gin.Context) uuid.UUID {
 	if v, ok := c.Get(ctxUserID); ok {
+		if id, ok := v.(uuid.UUID); ok {
+			return id
+		}
+	}
+	return uuid.Nil
+}
+
+// SessionID returns the caller's auth_sessions id, or uuid.Nil if Auth did not
+// run. Handlers use it to revoke the current session on logout.
+func SessionID(c *gin.Context) uuid.UUID {
+	if v, ok := c.Get(ctxSessionID); ok {
 		if id, ok := v.(uuid.UUID); ok {
 			return id
 		}

@@ -155,7 +155,9 @@ func setup(t *testing.T) *env {
 	hub := realtime.NewHub()
 	drawService := draw.NewService(pool)
 	tournamentService := tournament.NewService(pool)
-	authHandler := auth.NewHandler(auth.NewService(auth.NewRepository(pool), tokens))
+	sessions := auth.NewSessionRepository(pool)
+	verifier := auth.NewSessionVerifier(tokens, sessions)
+	authHandler := auth.NewHandler(auth.NewService(auth.NewRepository(pool), tokens, sessions), verifier)
 	realtimeHandler := realtime.NewHandler(hub, tournamentService.IsPublishedSlug)
 	tournamentHandler := tournament.NewHandler(tournamentService)
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)
@@ -166,7 +168,7 @@ func setup(t *testing.T) *env {
 	auditHandler := audit.NewHandler(audit.NewService(pool))
 
 	engine := server.New(server.Deps{
-		Config: cfg, Log: slog.New(slog.DiscardHandler), Pool: pool, Verifier: tokens,
+		Config: cfg, Log: slog.New(slog.DiscardHandler), Pool: pool, Verifier: verifier,
 		RegisterAuthRoutes: func(rg *gin.RouterGroup, v middleware.TokenVerifier) { authHandler.Register(rg, v) },
 		RegisterPublicRoutes: func(rg *gin.RouterGroup) {
 			tournamentHandler.RegisterPublic(rg)

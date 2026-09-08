@@ -9,4 +9,5 @@ const (
 	ctxUserID    = "user_id"
 	ctxUserRole  = "user_role"
 	ctxOrgID     = "org_id"
+	ctxSessionID = "session_id"
 )

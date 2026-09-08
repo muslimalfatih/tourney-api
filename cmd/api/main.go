@@ -58,7 +58,12 @@ func run() error {
 	// --- Construct modules (explicit wiring, no DI container) ---
 
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
-	authHandler := auth.NewHandler(auth.NewService(auth.NewRepository(pool), tokens))
+	sessions := auth.NewSessionRepository(pool)
+	// The verifier is what every authenticated route consults: it checks the
+	// JWT and then that its session is still alive.
+	verifier := auth.NewSessionVerifier(tokens, sessions)
+	authService := auth.NewService(auth.NewRepository(pool), tokens, sessions)
+	authHandler := auth.NewHandler(authService, verifier)
 
 	hub := realtime.NewHub()
 
@@ -81,7 +86,7 @@ func run() error {
 		Config:   cfg,
 		Log:      log,
 		Pool:     pool,
-		Verifier: tokens,
+		Verifier: verifier,
 
 		RegisterAuthRoutes: func(rg *gin.RouterGroup, v middleware.TokenVerifier) {
 			authHandler.Register(rg, v)
