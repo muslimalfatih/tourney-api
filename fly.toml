@@ -2,9 +2,11 @@
 # then re-annotated: everything below is a deliberate choice, not a default.
 #
 # Region: Singapore, close to the Indonesian audience. The Supabase project is
-# in Sydney, so each DB round-trip crosses ~90ms — if API latency ever becomes
-# the complaint, moving this to 'syd' (next to the database) is the first lever,
-# since a request makes several DB calls but only one trip to the viewer.
+# ALSO in Singapore (ap-southeast-1) since the 2026-09-06 cutover, so app and
+# database sit in one region and a DB round-trip is ~4ms (it was ~90ms while
+# the database lived in Sydney). Keep them co-located: this app makes several
+# DB calls per request but only one trip to the viewer, so splitting the two
+# across regions costs far more than it looks.
 
 app = 'tourney-api'
 primary_region = 'sin'
