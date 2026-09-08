@@ -15,6 +15,10 @@ import (
 // Entry is a single audit record to write. Diff holds an optional before/after
 // snapshot serialized to JSON.
 type Entry struct {
+	// ActorUserID is the human who acted. Leave it as uuid.Nil for events that
+	// happen before anyone is authenticated — an OTP request names an address,
+	// not yet an account — and it is stored as NULL rather than a zero UUID,
+	// which would fail the foreign key.
 	ActorUserID  uuid.UUID
 	OrgID        *uuid.UUID
 	TournamentID *uuid.UUID
@@ -71,8 +75,17 @@ func (s *Service) RecordTx(ctx context.Context, q Execer, e Entry) error {
 	_, err := q.Exec(ctx, `
 		INSERT INTO audit_logs (org_id, actor_user_id, tournament_id, action, target_type, target_id, diff)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-		e.OrgID, e.ActorUserID, e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
+		e.OrgID, actorOrNil(e.ActorUserID), e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
 	return err
+}
+
+// actorOrNil maps the zero UUID to a SQL NULL, so an unauthenticated event
+// records "no actor" instead of violating the users foreign key.
+func actorOrNil(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
 }
 
 func (s *Service) Record(ctx context.Context, e Entry) error {
@@ -88,7 +101,7 @@ func (s *Service) Record(ctx context.Context, e Entry) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (org_id, actor_user_id, tournament_id, action, target_type, target_id, diff)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-		e.OrgID, e.ActorUserID, e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
+		e.OrgID, actorOrNil(e.ActorUserID), e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
 	return err
 }
 

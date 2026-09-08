@@ -260,7 +260,9 @@ GET  /public/matches/:id
 <summary><strong>Auth</strong></summary>
 
 ```http
-POST /auth/login
+POST /auth/otp/request
+POST /auth/otp/verify
+POST /auth/login          # retained behind AUTH_PASSWORD_LOGIN_ENABLED
 POST /auth/refresh
 POST /auth/logout
 GET  /me

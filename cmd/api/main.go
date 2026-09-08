@@ -16,6 +16,7 @@ import (
 	"github.com/muslimalfatih/tourney-api/internal/auth"
 	"github.com/muslimalfatih/tourney-api/internal/config"
 	"github.com/muslimalfatih/tourney-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/email"
 	"github.com/muslimalfatih/tourney-api/internal/event"
 	"github.com/muslimalfatih/tourney-api/internal/match"
 	"github.com/muslimalfatih/tourney-api/internal/participant"
@@ -64,7 +65,28 @@ func run() error {
 	// JWT and then that its session is still alive.
 	verifier := auth.NewSessionVerifier(tokens, sessions, userRepo)
 	authService := auth.NewService(userRepo, tokens, sessions, cfg.PasswordLoginEnabled)
-	authHandler := auth.NewHandler(authService, verifier)
+
+	// Real deliveries only when the config allows them; otherwise the fake
+	// sender, so a misconfigured environment cannot email anybody.
+	var sender email.Sender
+	if plunk, perr := email.NewPlunkSender(
+		cfg.PlunkAPIKey, cfg.PlunkFromEmail, cfg.PlunkFromName,
+		cfg.IsProduction(), cfg.PlunkAllowRealSend,
+	); perr == nil {
+		sender = plunk
+	} else {
+		log.Warn("email sender is inert; codes will not be delivered", slog.String("reason", perr.Error()))
+		sender = email.NewFakeSender()
+	}
+
+	otpService := auth.NewOTPService(
+		userRepo,
+		auth.NewInvitationRepository(pool),
+		auth.NewOTPRepository(pool, cfg.OTPPepper),
+		sessions, tokens, auth.NewLimiter(), sender,
+		audit.NewService(pool), log,
+	)
+	authHandler := auth.NewHandler(authService, otpService, verifier)
 
 	hub := realtime.NewHub()
 

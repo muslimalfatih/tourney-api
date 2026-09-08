@@ -174,33 +174,22 @@ func (r *OTPRepository) Issue(ctx context.Context, p IssueParams) (string, *OTPC
 	return code, &ch, nil
 }
 
-// Verify checks a code and consumes the challenge on success.
+// LockLive loads the newest usable challenge for an address and holds a row
+// lock on it, inside the caller's transaction.
 //
-// The whole check runs inside one transaction holding SELECT ... FOR UPDATE on
-// the challenge row. Without that lock two concurrent requests carrying the
-// same correct code would both observe "not yet consumed" and both succeed,
-// which is precisely the replay the single-use rule exists to prevent.
-//
-// A failed attempt increments the counter and COMMITS, so a caller cannot
-// escape the cap by abandoning connections.
-func (r *OTPRepository) Verify(ctx context.Context, email, purpose, code string) (*OTPChallenge, error) {
+// Exported as its own step so the SUCCESS path can consume the challenge, create
+// the user, accept the invitation and open the session in ONE transaction —
+// either the whole sign-in happens or none of it does.
+func (r *OTPRepository) LockLive(ctx context.Context, q Querier, email, purpose string) (*OTPChallenge, string, error) {
 	email = NormalizeEmail(email)
 	if purpose == "" {
 		purpose = OTPPurposeLogin
 	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	var (
-		ch      OTPChallenge
-		hash    string
-		expires time.Time
+		ch   OTPChallenge
+		hash string
 	)
-	err = tx.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT id, email, purpose, invitation_id, attempts, max_attempts,
 		       created_at, expires_at, code_hash
 		FROM otp_challenges
@@ -210,53 +199,87 @@ func (r *OTPRepository) Verify(ctx context.Context, email, purpose, code string)
 		LIMIT 1
 		FOR UPDATE`, email, purpose).
 		Scan(&ch.ID, &ch.Email, &ch.Purpose, &ch.InvitationID, &ch.Attempts,
-			&ch.MaxAttempts, &ch.CreatedAt, &expires, &hash)
+			&ch.MaxAttempts, &ch.CreatedAt, &ch.ExpiresAt, &hash)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrOTPNotFound
+		return nil, "", ErrOTPNotFound
 	}
+	if err != nil {
+		return nil, "", err
+	}
+	return &ch, hash, nil
+}
+
+// CheckLive applies the non-cryptographic rules to a locked challenge.
+func CheckLive(ch *OTPChallenge) error {
+	if !ch.ExpiresAt.After(time.Now()) {
+		return ErrOTPExpired
+	}
+	if ch.Attempts >= ch.MaxAttempts {
+		return ErrOTPLocked
+	}
+	return nil
+}
+
+// Consume marks a challenge used, inside the caller's transaction.
+func (r *OTPRepository) Consume(ctx context.Context, q Querier, id uuid.UUID) error {
+	_, err := q.Exec(ctx, `
+		UPDATE otp_challenges
+		SET consumed_at = now(), last_attempt_at = now()
+		WHERE id = $1`, id)
+	return err
+}
+
+// RecordFailure increments the attempt counter in its OWN transaction, and
+// reports whether that reached the cap.
+//
+// Separate on purpose: the caller's transaction is rolled back on a wrong code,
+// and an attempt that vanished with it would let anyone escape the cap by
+// guessing until they hit the right answer. The increment is `attempts + 1` in
+// SQL, so concurrent wrong guesses each count.
+func (r *OTPRepository) RecordFailure(ctx context.Context, id uuid.UUID) (locked bool, err error) {
+	err = r.pool.QueryRow(ctx, `
+		UPDATE otp_challenges
+		SET attempts        = attempts + 1,
+		    last_attempt_at = now(),
+		    invalidated_at  = CASE WHEN attempts + 1 >= max_attempts THEN now() ELSE invalidated_at END
+		WHERE id = $1
+		RETURNING attempts >= max_attempts`, id).Scan(&locked)
+	return locked, err
+}
+
+// Verify is the standalone form: check a code and consume it, managing its own
+// transaction. Composed from the pieces above so there is only one definition
+// of the rules.
+func (r *OTPRepository) Verify(ctx context.Context, email, purpose, code string) (*OTPChallenge, error) {
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ch.ExpiresAt = expires
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	if !expires.After(time.Now()) {
-		return nil, ErrOTPExpired
+	ch, hash, err := r.LockLive(ctx, tx, email, purpose)
+	if err != nil {
+		return nil, err
 	}
-	if ch.Attempts >= ch.MaxAttempts {
-		return nil, ErrOTPLocked
+	if err := CheckLive(ch); err != nil {
+		return nil, err
 	}
-
 	if !VerifyCode(email, code, hash, r.pepper) {
-		attempts := ch.Attempts + 1
-		// Reaching the cap kills the challenge outright rather than leaving it
-		// to be retried once it "cools down": the holder requests a new code,
-		// which is both safer and simpler to explain.
-		invalidate := attempts >= ch.MaxAttempts
-		if _, e := tx.Exec(ctx, `
-			UPDATE otp_challenges
-			SET attempts = $2,
-			    last_attempt_at = now(),
-			    invalidated_at = CASE WHEN $3 THEN now() ELSE invalidated_at END
-			WHERE id = $1`, ch.ID, attempts, invalidate); e != nil {
+		_ = tx.Rollback(ctx)
+		locked, e := r.RecordFailure(ctx, ch.ID)
+		if e != nil {
 			return nil, e
 		}
-		if e := tx.Commit(ctx); e != nil {
-			return nil, e
-		}
-		if invalidate {
+		if locked {
 			return nil, ErrOTPLocked
 		}
 		return nil, ErrOTPInvalid
 	}
-
-	if _, err := tx.Exec(ctx, `
-		UPDATE otp_challenges
-		SET consumed_at = now(), last_attempt_at = now()
-		WHERE id = $1`, ch.ID); err != nil {
+	if err := r.Consume(ctx, tx, ch.ID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return &ch, nil
+	return ch, nil
 }

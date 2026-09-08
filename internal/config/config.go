@@ -39,6 +39,16 @@ type Config struct {
 	// code space offline in moments.
 	OTPPepper string `env:"OTP_PEPPER"`
 
+	// Plunk delivers transactional email. The key belongs in Fly secrets and
+	// the gitignored local .env, and must never reach Vercel, a PUBLIC_
+	// variable, source, tests or logs.
+	PlunkAPIKey    string `env:"PLUNK_API_KEY"`
+	PlunkFromEmail string `env:"PLUNK_FROM_EMAIL"`
+	PlunkFromName  string `env:"PLUNK_FROM_NAME" envDefault:"Tourney.social"`
+	// PlunkAllowRealSend permits real delivery outside production. Off unless
+	// deliberately set, so a stray run cannot email a real person.
+	PlunkAllowRealSend bool `env:"PLUNK_ALLOW_REAL_SEND" envDefault:"false"`
+
 	// PasswordLoginEnabled gates POST /auth/login while OTP replaces it.
 	//
 	// Default OFF: from 00014 onward the intended way in is an emailed code,

@@ -24,6 +24,14 @@ var ErrAccountSuspended = errors.New("account suspended")
 // This is a deployment state, not a secret.
 var ErrPasswordLoginDisabled = errors.New("password login is disabled")
 
+// ErrInvalidEmail is a shape failure, before any lookup happens.
+var ErrInvalidEmail = errors.New("invalid email address")
+
+// ErrDeliveryFailed means the email provider refused the message. The
+// provider's own response is never propagated: it can carry the recipient list
+// and, on some providers, the API key.
+var ErrDeliveryFailed = errors.New("could not send the verification code")
+
 // TokenPair is the result of a successful login or refresh.
 type TokenPair struct {
 	AccessToken  string

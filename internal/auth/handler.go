@@ -16,16 +16,22 @@ import (
 // the access token as a Bearer header on server-side API calls.
 type Handler struct {
 	svc      *Service
+	otp      *OTPService
 	verifier middleware.TokenVerifier
 }
 
-func NewHandler(svc *Service, verifier middleware.TokenVerifier) *Handler {
-	return &Handler{svc: svc, verifier: verifier}
+func NewHandler(svc *Service, otp *OTPService, verifier middleware.TokenVerifier) *Handler {
+	return &Handler{svc: svc, otp: otp, verifier: verifier}
 }
 
 // Register mounts the auth routes. verifier is passed so /me can sit behind the
 // Auth middleware using the same token service.
 func (h *Handler) Register(rg *gin.RouterGroup, verifier middleware.TokenVerifier) {
+	rg.POST("/auth/otp/request", h.otpRequest)
+	rg.POST("/auth/otp/verify", h.otpVerify)
+	// Retained behind AUTH_PASSWORD_LOGIN_ENABLED (default false) as the
+	// rollback path while OTP beds in. No separate /auth/otp/resend: repeating
+	// the request is the resend, and it shares the same rate limit.
 	rg.POST("/auth/login", h.login)
 	rg.POST("/auth/refresh", h.refresh)
 	rg.POST("/auth/logout", h.logout)
@@ -92,6 +98,89 @@ func (h *Handler) login(c *gin.Context) {
 		return
 	}
 
+	server.OK(c, tokenResponse{
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+		User:         toUserResponse(user),
+	})
+}
+
+type otpRequestBody struct {
+	Email string `json:"email" binding:"required"`
+}
+
+type otpVerifyBody struct {
+	Email string `json:"email" binding:"required"`
+	Code  string `json:"code"  binding:"required"`
+}
+
+// otpErr maps a flow error to its response. Every branch is a fixed, stable
+// code the web app switches on; the messages are ours to reword freely.
+func otpErr(err error) *server.AppError {
+	switch {
+	case errors.Is(err, ErrInvalidEmail):
+		return &server.AppError{Status: http.StatusUnprocessableEntity,
+			Code: "invalid_email", Message: "Enter a valid email address."}
+	case errors.Is(err, ErrNotInvited):
+		return &server.AppError{Status: http.StatusForbidden,
+			Code: "not_invited", Message: "This email has not been invited to Tourney.social."}
+	case errors.Is(err, ErrInvitationExpired):
+		return &server.AppError{Status: http.StatusForbidden,
+			Code: "invitation_expired", Message: "This invitation has expired. Contact the platform administrator."}
+	case errors.Is(err, ErrAccountSuspended):
+		return &server.AppError{Status: http.StatusForbidden,
+			Code: "account_suspended", Message: "This account is currently suspended."}
+	case errors.Is(err, ErrRateLimited), errors.Is(err, ErrOTPLocked):
+		return &server.AppError{Status: http.StatusTooManyRequests,
+			Code: "otp_rate_limited", Message: "Too many attempts. Please try again later."}
+	case errors.Is(err, ErrOTPExpired), errors.Is(err, ErrOTPNotFound):
+		return &server.AppError{Status: http.StatusUnauthorized,
+			Code: "code_expired", Message: "This verification code has expired. Request a new code."}
+	case errors.Is(err, ErrOTPInvalid):
+		return &server.AppError{Status: http.StatusUnauthorized,
+			Code: "invalid_code", Message: "The verification code is invalid."}
+	case errors.Is(err, ErrDeliveryFailed):
+		return &server.AppError{Status: http.StatusBadGateway,
+			Code: "delivery_failed", Message: "We could not send the code right now. Please try again."}
+	default:
+		return server.ErrInternal("")
+	}
+}
+
+// otpRequest sends a sign-in code to an invited address.
+//
+// The success response is deliberately empty and identical in every accepted
+// case, so it reveals nothing beyond what the explicit rejections already say.
+func (h *Handler) otpRequest(c *gin.Context) {
+	var req otpRequestBody
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, otpErr(ErrInvalidEmail))
+		return
+	}
+	if err := h.otp.Request(c.Request.Context(), RequestParams{
+		Email:     req.Email,
+		IP:        c.ClientIP(),
+		UserAgent: c.GetHeader("User-Agent"),
+	}); err != nil {
+		server.Error(c, otpErr(err))
+		return
+	}
+	server.OK(c, gin.H{"sent": true})
+}
+
+// otpVerify exchanges a correct code for a session.
+func (h *Handler) otpVerify(c *gin.Context) {
+	var req otpVerifyBody
+	if err := c.ShouldBindJSON(&req); err != nil {
+		server.Error(c, otpErr(ErrOTPInvalid))
+		return
+	}
+	pair, user, err := h.otp.VerifyAndSignIn(
+		c.Request.Context(), req.Email, req.Code, c.ClientIP(), c.GetHeader("User-Agent"))
+	if err != nil {
+		server.Error(c, otpErr(err))
+		return
+	}
 	server.OK(c, tokenResponse{
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,

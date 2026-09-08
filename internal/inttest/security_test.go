@@ -33,6 +33,7 @@ import (
 	"github.com/muslimalfatih/tourney-api/internal/auth"
 	"github.com/muslimalfatih/tourney-api/internal/config"
 	"github.com/muslimalfatih/tourney-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/email"
 	"github.com/muslimalfatih/tourney-api/internal/event"
 	"github.com/muslimalfatih/tourney-api/internal/match"
 	"github.com/muslimalfatih/tourney-api/internal/participant"
@@ -55,6 +56,9 @@ const (
 type env struct {
 	ts   *httptest.Server
 	pool *pgxpool.Pool
+	// mail is how tests read the code that was "sent". The engine never
+	// exposes a plaintext code any other way, which is the point.
+	mail *email.FakeSender
 }
 
 func (e *env) url(path string) string { return e.ts.URL + "/api/v1" + path }
@@ -158,10 +162,18 @@ func setup(t *testing.T) *env {
 	sessions := auth.NewSessionRepository(pool)
 	userRepo := auth.NewRepository(pool)
 	verifier := auth.NewSessionVerifier(tokens, sessions, userRepo)
+	fakeMail := email.NewFakeSender()
+	otpService := auth.NewOTPService(
+		userRepo,
+		auth.NewInvitationRepository(pool),
+		auth.NewOTPRepository(pool, itestPepper),
+		sessions, tokens, auth.NewLimiter(), fakeMail,
+		audit.NewService(pool), slog.New(slog.DiscardHandler),
+	)
 	// Password login is OFF in production from 00014 onward; the suite still
 	// exercises it because the security matrix predates OTP and is about
 	// authorization, not about how the caller signed in.
-	authHandler := auth.NewHandler(auth.NewService(userRepo, tokens, sessions, true), verifier)
+	authHandler := auth.NewHandler(auth.NewService(userRepo, tokens, sessions, true), otpService, verifier)
 	realtimeHandler := realtime.NewHandler(hub, tournamentService.IsPublishedSlug)
 	tournamentHandler := tournament.NewHandler(tournamentService)
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)
@@ -197,7 +209,7 @@ func setup(t *testing.T) *env {
 	ts := httptest.NewServer(engine)
 	t.Cleanup(ts.Close)
 
-	return &env{ts: ts, pool: pool}
+	return &env{ts: ts, pool: pool, mail: fakeMail}
 }
 
 // fixture creates a round_robin tournament with one division, two pairs and
