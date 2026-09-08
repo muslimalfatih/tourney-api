@@ -59,10 +59,11 @@ func run() error {
 
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 	sessions := auth.NewSessionRepository(pool)
+	userRepo := auth.NewRepository(pool)
 	// The verifier is what every authenticated route consults: it checks the
 	// JWT and then that its session is still alive.
-	verifier := auth.NewSessionVerifier(tokens, sessions)
-	authService := auth.NewService(auth.NewRepository(pool), tokens, sessions)
+	verifier := auth.NewSessionVerifier(tokens, sessions, userRepo)
+	authService := auth.NewService(userRepo, tokens, sessions, cfg.PasswordLoginEnabled)
 	authHandler := auth.NewHandler(authService, verifier)
 
 	hub := realtime.NewHub()

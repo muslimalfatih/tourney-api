@@ -156,8 +156,12 @@ func setup(t *testing.T) *env {
 	drawService := draw.NewService(pool)
 	tournamentService := tournament.NewService(pool)
 	sessions := auth.NewSessionRepository(pool)
-	verifier := auth.NewSessionVerifier(tokens, sessions)
-	authHandler := auth.NewHandler(auth.NewService(auth.NewRepository(pool), tokens, sessions), verifier)
+	userRepo := auth.NewRepository(pool)
+	verifier := auth.NewSessionVerifier(tokens, sessions, userRepo)
+	// Password login is OFF in production from 00014 onward; the suite still
+	// exercises it because the security matrix predates OTP and is about
+	// authorization, not about how the caller signed in.
+	authHandler := auth.NewHandler(auth.NewService(userRepo, tokens, sessions, true), verifier)
 	realtimeHandler := realtime.NewHandler(hub, tournamentService.IsPublishedSlug)
 	tournamentHandler := tournament.NewHandler(tournamentService)
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)

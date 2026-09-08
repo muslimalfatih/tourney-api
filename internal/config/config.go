@@ -33,6 +33,16 @@ type Config struct {
 	CORSOrigins []string `env:"CORS_ORIGINS" envSeparator:"," envDefault:"http://localhost:5173"`
 
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
+
+	// PasswordLoginEnabled gates POST /auth/login while OTP replaces it.
+	//
+	// Default OFF: from 00014 onward the intended way in is an emailed code,
+	// and leaving the password path live by default would mean a deploy could
+	// silently keep accepting credentials the product has retired. It stays in
+	// the codebase, and existing argon2id hashes stay in the database, so
+	// flipping this back to true is the rollback if OTP delivery fails —
+	// no redeploy, no data restore.
+	PasswordLoginEnabled bool `env:"AUTH_PASSWORD_LOGIN_ENABLED" envDefault:"false"`
 }
 
 // Load parses the environment into a Config and validates it.

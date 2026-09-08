@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -67,7 +68,22 @@ func (h *Handler) login(c *gin.Context) {
 	}
 
 	pair, user, err := h.svc.Login(c.Request.Context(), req.Email, req.Password)
-	if errors.Is(err, ErrInvalidCredentials) {
+	switch {
+	case errors.Is(err, ErrPasswordLoginDisabled):
+		server.Error(c, &server.AppError{
+			Status:  http.StatusForbidden,
+			Code:    "password_login_disabled",
+			Message: "Password sign-in is disabled. Use the sign-in code sent to your email.",
+		})
+		return
+	case errors.Is(err, ErrAccountSuspended):
+		server.Error(c, &server.AppError{
+			Status:  http.StatusForbidden,
+			Code:    "account_suspended",
+			Message: "This account is currently suspended.",
+		})
+		return
+	case errors.Is(err, ErrInvalidCredentials):
 		server.Error(c, server.ErrUnauthorized("invalid email or password"))
 		return
 	}

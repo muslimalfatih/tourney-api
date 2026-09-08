@@ -32,10 +32,11 @@ type Querier interface {
 type SessionVerifier struct {
 	tokens   *TokenService
 	sessions *SessionRepository
+	users    *Repository
 }
 
-func NewSessionVerifier(tokens *TokenService, sessions *SessionRepository) *SessionVerifier {
-	return &SessionVerifier{tokens: tokens, sessions: sessions}
+func NewSessionVerifier(tokens *TokenService, sessions *SessionRepository, users *Repository) *SessionVerifier {
+	return &SessionVerifier{tokens: tokens, sessions: sessions, users: users}
 }
 
 // VerifyAccessToken implements middleware.TokenVerifier.
@@ -59,9 +60,25 @@ func (v *SessionVerifier) VerifyAccessToken(ctx context.Context, raw string) (*m
 	if err != nil {
 		return nil, err
 	}
-	// The session is authoritative about WHO this is; the JWT only carries it
-	// for convenience. If they ever disagree, the row wins.
-	claims.UserID = sess.UserID
+	// The effective user must still be allowed in. Suspension revokes sessions
+	// directly (SuspendUser), so this is belt-and-braces — it also covers a
+	// status changed by hand in the database, which is exactly the case where a
+	// missed session would be least expected and most damaging.
+	user, err := v.users.FindByID(ctx, sess.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if !user.IsActive() {
+		return nil, ErrAccountSuspended
+	}
+
+	// The database is authoritative about who this is and what they may do; the
+	// JWT only carries it to save a lookup. Where they disagree, the row wins —
+	// so a role change takes effect on the next request rather than at token
+	// expiry.
+	claims.UserID = user.ID
+	claims.Role = user.Role
+	claims.OrgID = user.OrgID
 	claims.SessionID = sess.ID
 	return claims, nil
 }

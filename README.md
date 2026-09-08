@@ -329,7 +329,7 @@ a fixture that already exists — return **409** the same way.
 
 ## Database
 
-Thirteen goose migrations, applied in order. The later ones are worth knowing
+Fifteen goose migrations, applied in order. The later ones are worth knowing
 about, because each moves a rule out of application code and into the database:
 
 | Migration | What it does |
@@ -340,6 +340,8 @@ about, because each moves a rule out of application code and into the database:
 | `00011_tournament_timezone` | An IANA timezone per tournament — stored UTC, rendered local |
 | `00012_rls_all_public_tables` | Enables RLS on every public table by asking the catalog, so the list cannot drift again |
 | `00013_auth_sessions` | Sessions become rows, so logout and suspension can actually withdraw access |
+| `00014_users_otp_transition` | `users.status`, nullable `password_hash`, case-insensitive email uniqueness |
+| `00015_invitations` | The invitation allowlist — login is invite-only, with organization fixed at invite time |
 
 Core enums: `user_role`, `org_status`, `tournament_status`, `event_discipline`,
 `event_format` (`single_elim` · `round_robin` · `group_knockout`), `event_gender`,
