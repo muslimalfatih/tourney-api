@@ -329,7 +329,7 @@ a fixture that already exists — return **409** the same way.
 
 ## Database
 
-Fifteen goose migrations, applied in order. The later ones are worth knowing
+Sixteen goose migrations, applied in order. The later ones are worth knowing
 about, because each moves a rule out of application code and into the database:
 
 | Migration | What it does |
@@ -342,6 +342,7 @@ about, because each moves a rule out of application code and into the database:
 | `00013_auth_sessions` | Sessions become rows, so logout and suspension can actually withdraw access |
 | `00014_users_otp_transition` | `users.status`, nullable `password_hash`, case-insensitive email uniqueness |
 | `00015_invitations` | The invitation allowlist — login is invite-only, with organization fixed at invite time |
+| `00016_otp_challenges` | One-time sign-in codes, stored only as a peppered HMAC bound to the address |
 
 Core enums: `user_role`, `org_status`, `tournament_status`, `event_discipline`,
 `event_format` (`single_elim` · `round_robin` · `group_knockout`), `event_gender`,

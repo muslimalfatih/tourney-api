@@ -34,6 +34,11 @@ type Config struct {
 
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
 
+	// OTPPepper keys the HMAC that hashes one-time codes. Required once OTP
+	// login is live; without it a database reader could brute-force the 10^6
+	// code space offline in moments.
+	OTPPepper string `env:"OTP_PEPPER"`
+
 	// PasswordLoginEnabled gates POST /auth/login while OTP replaces it.
 	//
 	// Default OFF: from 00014 onward the intended way in is an emailed code,
@@ -57,6 +62,14 @@ func Load() (*Config, error) {
 	}
 	if len(cfg.JWTSecret) < 16 {
 		return nil, fmt.Errorf("JWT_SECRET must be at least 16 characters")
+	}
+	// Only enforced when the password path is closed, i.e. when OTP is the
+	// only way in. That keeps existing deployments bootable while Phase 5 is
+	// still landing, but makes a production config with no way to sign in
+	// fail at startup rather than at a user's first attempt.
+	if !cfg.PasswordLoginEnabled && len(cfg.OTPPepper) < 16 {
+		return nil, fmt.Errorf(
+			"OTP_PEPPER must be at least 16 characters when AUTH_PASSWORD_LOGIN_ENABLED is false")
 	}
 	return &cfg, nil
 }
