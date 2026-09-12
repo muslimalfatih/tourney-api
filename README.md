@@ -304,9 +304,15 @@ DELETE /schedule/slots/:id
 <summary><strong>Admin</strong> — <code>super_admin</code> only</summary>
 
 ```http
-GET  /admin/tournaments        POST /admin/tournaments/:id/status
+GET  /admin/overview           GET  /admin/settings          POST /admin/settings/plunk-test
 GET  /admin/organizations      POST /admin/organizations
-GET  /admin/audit-logs
+GET  /admin/tournaments        POST /admin/tournaments/:id/status   # reason required
+GET  /admin/invitations        POST /admin/invitations
+PATCH /admin/invitations/:id   POST /admin/invitations/:id/resend
+GET  /admin/users              GET  /admin/users/:id         PATCH /admin/users/:id
+POST /admin/users/:id/impersonate
+POST /admin/impersonation/exit   # authorized by session, not role
+GET  /admin/audit-logs           # filters: action, actor, effective_user, tournament, organization, impersonated, from, to
 ```
 </details>
 
@@ -331,7 +337,7 @@ a fixture that already exists — return **409** the same way.
 
 ## Database
 
-Sixteen goose migrations, applied in order. The later ones are worth knowing
+Eighteen goose migrations, applied in order. The later ones are worth knowing
 about, because each moves a rule out of application code and into the database:
 
 | Migration | What it does |
@@ -345,6 +351,8 @@ about, because each moves a rule out of application code and into the database:
 | `00014_users_otp_transition` | `users.status`, nullable `password_hash`, case-insensitive email uniqueness |
 | `00015_invitations` | The invitation allowlist — login is invite-only, with organization fixed at invite time |
 | `00016_otp_challenges` | One-time sign-in codes, stored only as a peppered HMAC bound to the address |
+| `00017_audit_impersonation` | Audit rows record both the real actor and the impersonated identity, plus a reason |
+| `00018_bootstrap_super_admin` | Idempotent, database-backed first super admin — no email string in any authorization path |
 
 Core enums: `user_role`, `org_status`, `tournament_status`, `event_discipline`,
 `event_format` (`single_elim` · `round_robin` · `group_knockout`), `event_gender`,

@@ -197,6 +197,14 @@ func (s *Service) Logout(ctx context.Context, sessionID uuid.UUID) error {
 	if sessionID == uuid.Nil {
 		return nil
 	}
+	// Signing out WHILE impersonating is a full sign-out: the borrowed identity
+	// and the super admin's own session both end. "Exit impersonation" is the
+	// separate, gentler operation that keeps the parent alive.
+	if sess, err := s.sessions.FindActive(ctx, sessionID); err == nil && sess.IsImpersonation() && sess.ParentSessionID != nil {
+		if err := s.sessions.Revoke(ctx, nil, *sess.ParentSessionID, RevokeLogout); err != nil {
+			return err
+		}
+	}
 	if err := s.sessions.RevokeChildren(ctx, nil, sessionID, RevokeParentLogout); err != nil {
 		return err
 	}

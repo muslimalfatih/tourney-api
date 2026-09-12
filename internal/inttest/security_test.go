@@ -162,26 +162,37 @@ func setup(t *testing.T) *env {
 	sessions := auth.NewSessionRepository(pool)
 	userRepo := auth.NewRepository(pool)
 	verifier := auth.NewSessionVerifier(tokens, sessions, userRepo)
+	// Password login is ON in the suite: the security matrix predates OTP and
+	// is about authorization, not about how the caller signed in.
+	authService := auth.NewService(userRepo, tokens, sessions, true)
 	fakeMail := email.NewFakeSender()
+	auditService := audit.NewService(pool)
 	otpService := auth.NewOTPService(
 		userRepo,
 		auth.NewInvitationRepository(pool),
 		auth.NewOTPRepository(pool, itestPepper),
 		sessions, tokens, auth.NewLimiter(), fakeMail,
-		audit.NewService(pool), slog.New(slog.DiscardHandler),
+		auditService, slog.New(slog.DiscardHandler),
 	)
 	// Password login is OFF in production from 00014 onward; the suite still
 	// exercises it because the security matrix predates OTP and is about
 	// authorization, not about how the caller signed in.
-	authHandler := auth.NewHandler(auth.NewService(userRepo, tokens, sessions, true), otpService, verifier)
+	authHandler := auth.NewHandler(authService, otpService, auditService, verifier)
 	realtimeHandler := realtime.NewHandler(hub, tournamentService.IsPublishedSlug)
 	tournamentHandler := tournament.NewHandler(tournamentService)
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)
 	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(match.NewService(pool), hub)
 	scheduleHandler := schedule.NewHandler(schedule.NewService(pool), hub)
-	platformHandler := platform.NewHandler(platform.NewService(pool))
-	auditHandler := audit.NewHandler(audit.NewService(pool))
+	platformService := platform.NewService(platform.Deps{
+		Pool: pool, Audit: auditService, Sessions: sessions,
+		Invitations: auth.NewInvitationRepository(pool), Auth: authService,
+	})
+	platformHandler := platform.NewHandler(platform.HandlerDeps{
+		Service: platformService, Auth: authService, OTP: otpService, Sender: fakeMail,
+		Settings: platform.SettingsSource{DefaultTimezone: "Asia/Makassar", Environment: "test", PasswordLoginOn: true},
+	})
+	auditHandler := audit.NewHandler(auditService)
 
 	engine := server.New(server.Deps{
 		Config: cfg, Log: slog.New(slog.DiscardHandler), Pool: pool, Verifier: verifier,
@@ -406,7 +417,7 @@ func TestSecurityMatrix(t *testing.T) {
 
 	// --- ARCHIVED ------------------------------------------------------
 	if st, res := e.call(t, "POST", "/admin/tournaments/"+f.tournamentID+"/status",
-		map[string]string{"action": "archive"}, adminTok); st != 200 {
+		map[string]string{"action": "archive", "reason": "itest"}, adminTok); st != 200 {
 		t.Fatalf("archive: %d %v", st, res)
 	}
 	if st, _ := e.call(t, "GET", "/public/matches/"+f.matchID, nil, ""); st != 404 {

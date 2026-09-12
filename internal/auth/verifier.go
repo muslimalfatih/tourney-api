@@ -80,5 +80,6 @@ func (v *SessionVerifier) VerifyAccessToken(ctx context.Context, raw string) (*m
 	claims.Role = user.Role
 	claims.OrgID = user.OrgID
 	claims.SessionID = sess.ID
+	claims.ActorUserID = sess.ActorUserID
 	return claims, nil
 }

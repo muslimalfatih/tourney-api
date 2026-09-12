@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 )
 
 // Entry is a single audit record to write. Diff holds an optional before/after
@@ -19,7 +21,15 @@ type Entry struct {
 	// happen before anyone is authenticated — an OTP request names an address,
 	// not yet an account — and it is stored as NULL rather than a zero UUID,
 	// which would fail the foreign key.
-	ActorUserID  uuid.UUID
+	ActorUserID uuid.UUID
+	// EffectiveUserID is the identity the request ran under during
+	// impersonation — the organizer — and nil at every other time. Both
+	// columns exist so the log can answer "who really did this" and "as whom"
+	// separately.
+	EffectiveUserID        *uuid.UUID
+	ImpersonationSessionID *uuid.UUID
+	// Reason is required for platform force actions and encouraged elsewhere.
+	Reason       *string
 	OrgID        *uuid.UUID
 	TournamentID *uuid.UUID
 	Action       string
@@ -30,14 +40,19 @@ type Entry struct {
 
 // Log is a stored audit record joined with the actor's name for display.
 type Log struct {
-	ID           uuid.UUID      `json:"id"`
-	ActorName    *string        `json:"actor_name"`
-	Action       string         `json:"action"`
-	TargetType   string         `json:"target_type"`
-	TargetID     string         `json:"target_id"`
-	TournamentID *uuid.UUID     `json:"tournament_id"`
-	Diff         map[string]any `json:"diff"`
-	CreatedAt    time.Time      `json:"created_at"`
+	ID             uuid.UUID      `json:"id"`
+	ActorName      *string        `json:"actor_name"`
+	ActorEmail     *string        `json:"actor_email"`
+	EffectiveName  *string        `json:"effective_name"`
+	EffectiveEmail *string        `json:"effective_email"`
+	Impersonated   bool           `json:"impersonated"`
+	Reason         *string        `json:"reason"`
+	Action         string         `json:"action"`
+	TargetType     string         `json:"target_type"`
+	TargetID       string         `json:"target_id"`
+	TournamentID   *uuid.UUID     `json:"tournament_id"`
+	Diff           map[string]any `json:"diff"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 type Service struct {
@@ -62,7 +77,35 @@ type Execer interface {
 }
 
 // RecordTx is Record on a caller-supplied transaction/connection.
+// attribute fills in the impersonation fields from the request context when
+// the caller did not set them explicitly.
+//
+// Services today pass middleware.UserID(c) as the actor, which during
+// impersonation is the ORGANIZER. The context knows better: the real actor is
+// the super admin, and the organizer is the effective user. Correcting that
+// here, once, means no existing writer records the wrong person and no future
+// writer can forget.
+func attribute(ctx context.Context, e Entry) Entry {
+	a, ok := middleware.AttributionFrom(ctx)
+	if !ok || a.Effective == nil {
+		return e
+	}
+	if e.EffectiveUserID == nil {
+		e.EffectiveUserID = a.Effective
+	}
+	if e.ImpersonationSessionID == nil {
+		e.ImpersonationSessionID = a.Session
+	}
+	// If the writer named the effective user as the actor, or nobody at all,
+	// the actor is really the human behind the impersonation.
+	if e.ActorUserID == uuid.Nil || e.ActorUserID == *a.Effective {
+		e.ActorUserID = a.Actor
+	}
+	return e
+}
+
 func (s *Service) RecordTx(ctx context.Context, q Execer, e Entry) error {
+	e = attribute(ctx, e)
 	var diff *string
 	if e.Diff != nil {
 		b, err := json.Marshal(e.Diff)
@@ -73,9 +116,12 @@ func (s *Service) RecordTx(ctx context.Context, q Execer, e Entry) error {
 		diff = &str
 	}
 	_, err := q.Exec(ctx, `
-		INSERT INTO audit_logs (org_id, actor_user_id, tournament_id, action, target_type, target_id, diff)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-		e.OrgID, actorOrNil(e.ActorUserID), e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
+		INSERT INTO audit_logs
+			(org_id, actor_user_id, effective_user_id, impersonation_session_id, reason,
+			 tournament_id, action, target_type, target_id, diff)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+		e.OrgID, actorOrNil(e.ActorUserID), e.EffectiveUserID, e.ImpersonationSessionID, e.Reason,
+		e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
 	return err
 }
 
@@ -89,6 +135,7 @@ func actorOrNil(id uuid.UUID) *uuid.UUID {
 }
 
 func (s *Service) Record(ctx context.Context, e Entry) error {
+	e = attribute(ctx, e)
 	var diff *string
 	if e.Diff != nil {
 		b, err := json.Marshal(e.Diff)
@@ -99,22 +146,60 @@ func (s *Service) Record(ctx context.Context, e Entry) error {
 		diff = &str
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO audit_logs (org_id, actor_user_id, tournament_id, action, target_type, target_id, diff)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-		e.OrgID, actorOrNil(e.ActorUserID), e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
+		INSERT INTO audit_logs
+			(org_id, actor_user_id, effective_user_id, impersonation_session_id, reason,
+			 tournament_id, action, target_type, target_id, diff)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+		e.OrgID, actorOrNil(e.ActorUserID), e.EffectiveUserID, e.ImpersonationSessionID, e.Reason,
+		e.TournamentID, e.Action, e.TargetType, e.TargetID, diff)
 	return err
 }
 
-// List returns recent audit records (super-admin view), newest first.
-func (s *Service) List(ctx context.Context, limit, offset int) ([]Log, int64, error) {
+// ListFilter narrows the platform audit view. Zero values mean "no filter".
+type ListFilter struct {
+	Action           string
+	ActorUserID      *uuid.UUID
+	EffectiveUserID  *uuid.UUID
+	TournamentID     *uuid.UUID
+	OrgID            *uuid.UUID
+	ImpersonatedOnly bool
+	From             *time.Time
+	To               *time.Time
+}
+
+// List returns audit records (super-admin view), newest first.
+//
+// Both people on a row are resolved to names for display; the raw diff is
+// returned as-is because it never contains secrets — writers are responsible
+// for that, and a test greps for OTP codes to keep them honest.
+func (s *Service) List(ctx context.Context, f ListFilter, limit, offset int) ([]Log, int64, error) {
 	const q = `
-		SELECT a.id, u.name, a.action, a.target_type, a.target_id, a.tournament_id, a.diff, a.created_at,
+		SELECT a.id,
+		       actor.name, actor.email,
+		       eff.name,   eff.email,
+		       a.impersonation_session_id IS NOT NULL,
+		       a.reason,
+		       a.action, a.target_type, a.target_id, a.tournament_id, a.diff, a.created_at,
 		       COUNT(*) OVER() AS total
 		FROM audit_logs a
-		LEFT JOIN users u ON u.id = a.actor_user_id
+		LEFT JOIN users actor ON actor.id = a.actor_user_id
+		LEFT JOIN users eff   ON eff.id   = a.effective_user_id
+		WHERE ($3::text IS NULL OR a.action = $3)
+		  AND ($4::uuid IS NULL OR a.actor_user_id = $4)
+		  AND ($5::uuid IS NULL OR a.effective_user_id = $5)
+		  AND ($6::uuid IS NULL OR a.tournament_id = $6)
+		  AND ($7::uuid IS NULL OR a.org_id = $7)
+		  AND (NOT $8::bool OR a.impersonation_session_id IS NOT NULL)
+		  AND ($9::timestamptz IS NULL OR a.created_at >= $9)
+		  AND ($10::timestamptz IS NULL OR a.created_at < $10)
 		ORDER BY a.created_at DESC
 		LIMIT $1 OFFSET $2`
-	rows, err := s.pool.Query(ctx, q, limit, offset)
+	var action *string
+	if f.Action != "" {
+		action = &f.Action
+	}
+	rows, err := s.pool.Query(ctx, q, limit, offset, action, f.ActorUserID, f.EffectiveUserID,
+		f.TournamentID, f.OrgID, f.ImpersonatedOnly, f.From, f.To)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -124,7 +209,8 @@ func (s *Service) List(ctx context.Context, limit, offset int) ([]Log, int64, er
 	for rows.Next() {
 		var l Log
 		var diff []byte
-		if err := rows.Scan(&l.ID, &l.ActorName, &l.Action, &l.TargetType, &l.TargetID,
+		if err := rows.Scan(&l.ID, &l.ActorName, &l.ActorEmail, &l.EffectiveName, &l.EffectiveEmail,
+			&l.Impersonated, &l.Reason, &l.Action, &l.TargetType, &l.TargetID,
 			&l.TournamentID, &diff, &l.CreatedAt, &total); err != nil {
 			return nil, 0, err
 		}

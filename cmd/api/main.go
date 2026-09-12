@@ -58,6 +58,7 @@ func run() error {
 
 	// --- Construct modules (explicit wiring, no DI container) ---
 
+	auditService := audit.NewService(pool)
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 	sessions := auth.NewSessionRepository(pool)
 	userRepo := auth.NewRepository(pool)
@@ -84,13 +85,13 @@ func run() error {
 		auth.NewInvitationRepository(pool),
 		auth.NewOTPRepository(pool, cfg.OTPPepper),
 		sessions, tokens, auth.NewLimiter(), sender,
-		audit.NewService(pool), log,
+		auditService, log,
 	)
-	authHandler := auth.NewHandler(authService, otpService, verifier)
+	authHandler := auth.NewHandler(authService, otpService, auditService, verifier)
 
 	hub := realtime.NewHub()
 
-	auditHandler := audit.NewHandler(audit.NewService(pool))
+	auditHandler := audit.NewHandler(auditService)
 
 	drawService := draw.NewService(pool)
 	tournamentService := tournament.NewService(pool)
@@ -101,7 +102,24 @@ func run() error {
 	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(match.NewService(pool), hub)
 	scheduleHandler := schedule.NewHandler(schedule.NewService(pool), hub)
-	platformHandler := platform.NewHandler(platform.NewService(pool))
+	platformService := platform.NewService(platform.Deps{
+		Pool: pool, Audit: auditService, Sessions: sessions,
+		Invitations: auth.NewInvitationRepository(pool), Auth: authService,
+	})
+	platformHandler := platform.NewHandler(platform.HandlerDeps{
+		Service: platformService, Auth: authService, OTP: otpService, Sender: sender,
+		// Only booleans and display strings cross into the settings page — the
+		// secret itself never leaves config.
+		Settings: platform.SettingsSource{
+			DefaultTimezone: "Asia/Makassar",
+			PlunkConfigured: cfg.PlunkAPIKey != "" && cfg.PlunkFromEmail != "",
+			PlunkFromEmail:  cfg.PlunkFromEmail,
+			PlunkFromName:   cfg.PlunkFromName,
+			PasswordLoginOn: cfg.PasswordLoginEnabled,
+			RealSendAllowed: cfg.IsProduction() || cfg.PlunkAllowRealSend,
+			Environment:     cfg.Env,
+		},
+	})
 
 	// --- Wire routes via the server's registrar hooks ---
 

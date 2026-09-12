@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/muslimalfatih/tourney-api/internal/audit"
 	"github.com/muslimalfatih/tourney-api/internal/server"
 	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 )
@@ -17,11 +18,12 @@ import (
 type Handler struct {
 	svc      *Service
 	otp      *OTPService
+	audit    *audit.Service
 	verifier middleware.TokenVerifier
 }
 
-func NewHandler(svc *Service, otp *OTPService, verifier middleware.TokenVerifier) *Handler {
-	return &Handler{svc: svc, otp: otp, verifier: verifier}
+func NewHandler(svc *Service, otp *OTPService, auditSvc *audit.Service, verifier middleware.TokenVerifier) *Handler {
+	return &Handler{svc: svc, otp: otp, audit: auditSvc, verifier: verifier}
 }
 
 // Register mounts the auth routes. verifier is passed so /me can sit behind the
@@ -36,6 +38,10 @@ func (h *Handler) Register(rg *gin.RouterGroup, verifier middleware.TokenVerifie
 	rg.POST("/auth/refresh", h.refresh)
 	rg.POST("/auth/logout", h.logout)
 	rg.GET("/me", middleware.Auth(verifier), h.me)
+	// Exit is authorized by the SESSION (it must be an impersonation), not by
+	// role: the caller's effective role is organizer, so the super-admin group
+	// would rightly refuse them. It therefore lives here, behind Auth alone.
+	rg.POST("/admin/impersonation/exit", middleware.Auth(verifier), h.exitImpersonation)
 }
 
 type loginRequest struct {
@@ -50,11 +56,13 @@ type tokenResponse struct {
 }
 
 type userResponse struct {
-	ID    string  `json:"id"`
-	Email string  `json:"email"`
-	Name  string  `json:"name"`
-	Role  string  `json:"role"`
-	OrgID *string `json:"org_id"`
+	ID            string             `json:"id"`
+	Email         string             `json:"email"`
+	Name          string             `json:"name"`
+	Role          string             `json:"role"`
+	OrgID         *string            `json:"org_id"`
+	Status        string             `json:"status,omitempty"`
+	Impersonation *ImpersonationInfo `json:"impersonation,omitempty"`
 }
 
 func toUserResponse(u *User) userResponse {
@@ -63,7 +71,7 @@ func toUserResponse(u *User) userResponse {
 		v := u.OrgID.String()
 		org = &v
 	}
-	return userResponse{ID: u.ID.String(), Email: u.Email, Name: u.Name, Role: u.Role, OrgID: org}
+	return userResponse{ID: u.ID.String(), Email: u.Email, Name: u.Name, Role: u.Role, OrgID: org, Status: u.Status}
 }
 
 func (h *Handler) login(c *gin.Context) {
@@ -251,11 +259,43 @@ func bearerToken(c *gin.Context) string {
 	return parts[1]
 }
 
+// me returns the effective identity plus, during impersonation, a safe block
+// naming the real actor. The banner renders from this and nothing else.
 func (h *Handler) me(c *gin.Context) {
 	user, err := h.svc.Me(c.Request.Context(), middleware.UserID(c))
 	if err != nil {
 		server.Error(c, server.ErrNotFound("user not found"))
 		return
 	}
-	server.OK(c, toUserResponse(user))
+	res := toUserResponse(user)
+	if middleware.IsImpersonating(c) {
+		if info, err := h.svc.ImpersonationFor(c.Request.Context(), middleware.SessionID(c)); err == nil {
+			res.Impersonation = info
+		}
+	}
+	server.OK(c, res)
+}
+
+// exitImpersonation ends the borrowed identity and hands back the super admin's
+// own session. No user id is accepted from the client; the session row decides.
+func (h *Handler) exitImpersonation(c *gin.Context) {
+	pair, admin, err := h.svc.ExitImpersonation(c.Request.Context(), h.audit, middleware.SessionID(c))
+	switch {
+	case errors.Is(err, ErrNotImpersonating):
+		server.Error(c, server.ErrBadRequest("this session is not an impersonation"))
+		return
+	case errors.Is(err, ErrSessionNotFound):
+		// The parent is gone: nothing to return to. The client should treat
+		// this exactly like a sign-out.
+		server.Error(c, server.ErrUnauthorized("the original session is no longer valid; sign in again"))
+		return
+	case err != nil:
+		server.Error(c, server.ErrInternal(""))
+		return
+	}
+	server.OK(c, tokenResponse{
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+		User:         toUserResponse(admin),
+	})
 }

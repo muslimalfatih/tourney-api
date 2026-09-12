@@ -10,4 +10,6 @@ const (
 	ctxUserRole  = "user_role"
 	ctxOrgID     = "org_id"
 	ctxSessionID = "session_id"
+	// Set only during impersonation: the real super admin behind the request.
+	ctxActorUserID = "actor_user_id"
 )
