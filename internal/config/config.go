@@ -45,6 +45,10 @@ type Config struct {
 	PlunkAPIKey    string `env:"PLUNK_API_KEY"`
 	PlunkFromEmail string `env:"PLUNK_FROM_EMAIL"`
 	PlunkFromName  string `env:"PLUNK_FROM_NAME" envDefault:"Tourney.social"`
+	// PlunkSendURL overrides the transactional endpoint. Plunk's docs currently
+	// disagree with themselves about the host, so this is settable rather than
+	// baked in. Empty uses email.DefaultPlunkSendURL.
+	PlunkSendURL string `env:"PLUNK_API_URL"`
 	// PlunkAllowRealSend permits real delivery outside production. Off unless
 	// deliberately set, so a stray run cannot email a real person.
 	PlunkAllowRealSend bool `env:"PLUNK_ALLOW_REAL_SEND" envDefault:"false"`

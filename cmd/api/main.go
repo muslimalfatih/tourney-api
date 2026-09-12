@@ -70,7 +70,7 @@ func run() error {
 	// sender, so a misconfigured environment cannot email anybody.
 	var sender email.Sender
 	if plunk, perr := email.NewPlunkSender(
-		cfg.PlunkAPIKey, cfg.PlunkFromEmail, cfg.PlunkFromName,
+		cfg.PlunkAPIKey, cfg.PlunkFromEmail, cfg.PlunkFromName, cfg.PlunkSendURL,
 		cfg.IsProduction(), cfg.PlunkAllowRealSend,
 	); perr == nil {
 		sender = plunk
