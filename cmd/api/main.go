@@ -26,6 +26,7 @@ import (
 	"github.com/muslimalfatih/tourney-api/internal/server"
 	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 	"github.com/muslimalfatih/tourney-api/internal/storage/postgres"
+	"github.com/muslimalfatih/tourney-api/internal/testhooks"
 	"github.com/muslimalfatih/tourney-api/internal/tournament"
 )
 
@@ -69,8 +70,19 @@ func run() error {
 
 	// Real deliveries only when the config allows them; otherwise the fake
 	// sender, so a misconfigured environment cannot email anybody.
+	//
+	// E2E_TEST_MODE forces the fake sender UNCONDITIONALLY, even if a real
+	// PLUNK_API_KEY is sitting in the environment -- an automated browser run
+	// must never be one stray env var away from emailing a real address, and
+	// fakeSenderForHooks is what testhooks.Register reads codes back from
+	// below, so the two concerns share one sender by construction rather than
+	// by remembering to keep two switches in sync.
 	var sender email.Sender
-	if plunk, perr := email.NewPlunkSender(
+	var fakeSenderForHooks *email.FakeSender
+	if cfg.E2ETestMode {
+		fakeSenderForHooks = email.NewFakeSender()
+		sender = fakeSenderForHooks
+	} else if plunk, perr := email.NewPlunkSender(
 		cfg.PlunkAPIKey, cfg.PlunkFromEmail, cfg.PlunkFromName, cfg.PlunkSendURL,
 		cfg.IsProduction(), cfg.PlunkAllowRealSend,
 	); perr == nil {
@@ -154,6 +166,12 @@ func run() error {
 	}
 
 	engine := server.New(deps)
+
+	if fakeSenderForHooks != nil {
+		testhooks.Register(engine, fakeSenderForHooks)
+		log.Warn("E2E_TEST_MODE is on: /internal/test/last-otp is mounted and all email is faked")
+	}
+
 	return server.Run(ctx, engine, cfg.Port, log)
 }
 

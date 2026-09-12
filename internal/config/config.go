@@ -53,6 +53,15 @@ type Config struct {
 	// deliberately set, so a stray run cannot email a real person.
 	PlunkAllowRealSend bool `env:"PLUNK_ALLOW_REAL_SEND" envDefault:"false"`
 
+	// E2ETestMode mounts /internal/test/last-otp, the ONLY way to read back a
+	// just-issued sign-in code -- otp_challenges stores nothing but an
+	// irreversible HMAC hash (see internal/auth/otp.go), by design, so a
+	// browser-driven test has no other route to the code an email would have
+	// carried. Off by default, and refused outright in production below: this
+	// exists for the e2e suite's launch script to set, never for a real
+	// deployment to inherit by accident.
+	E2ETestMode bool `env:"E2E_TEST_MODE" envDefault:"false"`
+
 	// PasswordLoginEnabled gates POST /auth/login while OTP replaces it.
 	//
 	// Default OFF: from 00014 onward the intended way in is an emailed code,
@@ -84,6 +93,9 @@ func Load() (*Config, error) {
 	if !cfg.PasswordLoginEnabled && len(cfg.OTPPepper) < 16 {
 		return nil, fmt.Errorf(
 			"OTP_PEPPER must be at least 16 characters when AUTH_PASSWORD_LOGIN_ENABLED is false")
+	}
+	if cfg.E2ETestMode && cfg.IsProduction() {
+		return nil, fmt.Errorf("E2E_TEST_MODE must never be enabled when APP_ENV=production")
 	}
 	return &cfg, nil
 }
