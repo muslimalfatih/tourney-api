@@ -33,6 +33,7 @@ import (
 	"github.com/muslimalfatih/tourney-api/internal/auth"
 	"github.com/muslimalfatih/tourney-api/internal/config"
 	"github.com/muslimalfatih/tourney-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/email"
 	"github.com/muslimalfatih/tourney-api/internal/event"
 	"github.com/muslimalfatih/tourney-api/internal/match"
 	"github.com/muslimalfatih/tourney-api/internal/participant"
@@ -55,6 +56,9 @@ const (
 type env struct {
 	ts   *httptest.Server
 	pool *pgxpool.Pool
+	// mail is how tests read the code that was "sent". The engine never
+	// exposes a plaintext code any other way, which is the point.
+	mail *email.FakeSender
 }
 
 func (e *env) url(path string) string { return e.ts.URL + "/api/v1" + path }
@@ -155,18 +159,43 @@ func setup(t *testing.T) *env {
 	hub := realtime.NewHub()
 	drawService := draw.NewService(pool)
 	tournamentService := tournament.NewService(pool)
-	authHandler := auth.NewHandler(auth.NewService(auth.NewRepository(pool), tokens))
+	sessions := auth.NewSessionRepository(pool)
+	userRepo := auth.NewRepository(pool)
+	verifier := auth.NewSessionVerifier(tokens, sessions, userRepo)
+	// Password login is ON in the suite: the security matrix predates OTP and
+	// is about authorization, not about how the caller signed in.
+	authService := auth.NewService(userRepo, tokens, sessions, true)
+	fakeMail := email.NewFakeSender()
+	auditService := audit.NewService(pool)
+	otpService := auth.NewOTPService(
+		userRepo,
+		auth.NewInvitationRepository(pool),
+		auth.NewOTPRepository(pool, itestPepper),
+		sessions, tokens, auth.NewLimiter(), fakeMail,
+		auditService, slog.New(slog.DiscardHandler),
+	)
+	// Password login is OFF in production from 00014 onward; the suite still
+	// exercises it because the security matrix predates OTP and is about
+	// authorization, not about how the caller signed in.
+	authHandler := auth.NewHandler(authService, otpService, auditService, verifier)
 	realtimeHandler := realtime.NewHandler(hub, tournamentService.IsPublishedSlug)
 	tournamentHandler := tournament.NewHandler(tournamentService)
 	eventHandler := event.NewHandler(event.NewService(pool), drawService)
 	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(match.NewService(pool), hub)
 	scheduleHandler := schedule.NewHandler(schedule.NewService(pool), hub)
-	platformHandler := platform.NewHandler(platform.NewService(pool))
-	auditHandler := audit.NewHandler(audit.NewService(pool))
+	platformService := platform.NewService(platform.Deps{
+		Pool: pool, Audit: auditService, Sessions: sessions,
+		Invitations: auth.NewInvitationRepository(pool), Auth: authService,
+	})
+	platformHandler := platform.NewHandler(platform.HandlerDeps{
+		Service: platformService, Auth: authService, OTP: otpService, Sender: fakeMail,
+		Settings: platform.SettingsSource{DefaultTimezone: "Asia/Makassar", Environment: "test", PasswordLoginOn: true},
+	})
+	auditHandler := audit.NewHandler(auditService)
 
 	engine := server.New(server.Deps{
-		Config: cfg, Log: slog.New(slog.DiscardHandler), Pool: pool, Verifier: tokens,
+		Config: cfg, Log: slog.New(slog.DiscardHandler), Pool: pool, Verifier: verifier,
 		RegisterAuthRoutes: func(rg *gin.RouterGroup, v middleware.TokenVerifier) { authHandler.Register(rg, v) },
 		RegisterPublicRoutes: func(rg *gin.RouterGroup) {
 			tournamentHandler.RegisterPublic(rg)
@@ -191,7 +220,7 @@ func setup(t *testing.T) *env {
 	ts := httptest.NewServer(engine)
 	t.Cleanup(ts.Close)
 
-	return &env{ts: ts, pool: pool}
+	return &env{ts: ts, pool: pool, mail: fakeMail}
 }
 
 // fixture creates a round_robin tournament with one division, two pairs and
@@ -388,7 +417,7 @@ func TestSecurityMatrix(t *testing.T) {
 
 	// --- ARCHIVED ------------------------------------------------------
 	if st, res := e.call(t, "POST", "/admin/tournaments/"+f.tournamentID+"/status",
-		map[string]string{"action": "archive"}, adminTok); st != 200 {
+		map[string]string{"action": "archive", "reason": "itest"}, adminTok); st != 200 {
 		t.Fatalf("archive: %d %v", st, res)
 	}
 	if st, _ := e.call(t, "GET", "/public/matches/"+f.matchID, nil, ""); st != 404 {

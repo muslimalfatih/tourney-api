@@ -33,6 +33,44 @@ type Config struct {
 	CORSOrigins []string `env:"CORS_ORIGINS" envSeparator:"," envDefault:"http://localhost:5173"`
 
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
+
+	// OTPPepper keys the HMAC that hashes one-time codes. Required once OTP
+	// login is live; without it a database reader could brute-force the 10^6
+	// code space offline in moments.
+	OTPPepper string `env:"OTP_PEPPER"`
+
+	// Plunk delivers transactional email. The key belongs in Fly secrets and
+	// the gitignored local .env, and must never reach Vercel, a PUBLIC_
+	// variable, source, tests or logs.
+	PlunkAPIKey    string `env:"PLUNK_API_KEY"`
+	PlunkFromEmail string `env:"PLUNK_FROM_EMAIL"`
+	PlunkFromName  string `env:"PLUNK_FROM_NAME" envDefault:"Tourney.social"`
+	// PlunkSendURL overrides the transactional endpoint. Plunk's docs currently
+	// disagree with themselves about the host, so this is settable rather than
+	// baked in. Empty uses email.DefaultPlunkSendURL.
+	PlunkSendURL string `env:"PLUNK_API_URL"`
+	// PlunkAllowRealSend permits real delivery outside production. Off unless
+	// deliberately set, so a stray run cannot email a real person.
+	PlunkAllowRealSend bool `env:"PLUNK_ALLOW_REAL_SEND" envDefault:"false"`
+
+	// E2ETestMode mounts /internal/test/last-otp, the ONLY way to read back a
+	// just-issued sign-in code -- otp_challenges stores nothing but an
+	// irreversible HMAC hash (see internal/auth/otp.go), by design, so a
+	// browser-driven test has no other route to the code an email would have
+	// carried. Off by default, and refused outright in production below: this
+	// exists for the e2e suite's launch script to set, never for a real
+	// deployment to inherit by accident.
+	E2ETestMode bool `env:"E2E_TEST_MODE" envDefault:"false"`
+
+	// PasswordLoginEnabled gates POST /auth/login while OTP replaces it.
+	//
+	// Default OFF: from 00014 onward the intended way in is an emailed code,
+	// and leaving the password path live by default would mean a deploy could
+	// silently keep accepting credentials the product has retired. It stays in
+	// the codebase, and existing argon2id hashes stay in the database, so
+	// flipping this back to true is the rollback if OTP delivery fails —
+	// no redeploy, no data restore.
+	PasswordLoginEnabled bool `env:"AUTH_PASSWORD_LOGIN_ENABLED" envDefault:"false"`
 }
 
 // Load parses the environment into a Config and validates it.
@@ -47,6 +85,17 @@ func Load() (*Config, error) {
 	}
 	if len(cfg.JWTSecret) < 16 {
 		return nil, fmt.Errorf("JWT_SECRET must be at least 16 characters")
+	}
+	// Only enforced when the password path is closed, i.e. when OTP is the
+	// only way in. That keeps existing deployments bootable while Phase 5 is
+	// still landing, but makes a production config with no way to sign in
+	// fail at startup rather than at a user's first attempt.
+	if !cfg.PasswordLoginEnabled && len(cfg.OTPPepper) < 16 {
+		return nil, fmt.Errorf(
+			"OTP_PEPPER must be at least 16 characters when AUTH_PASSWORD_LOGIN_ENABLED is false")
+	}
+	if cfg.E2ETestMode && cfg.IsProduction() {
+		return nil, fmt.Errorf("E2E_TEST_MODE must never be enabled when APP_ENV=production")
 	}
 	return &cfg, nil
 }

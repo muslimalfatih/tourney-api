@@ -16,6 +16,7 @@ import (
 	"github.com/muslimalfatih/tourney-api/internal/auth"
 	"github.com/muslimalfatih/tourney-api/internal/config"
 	"github.com/muslimalfatih/tourney-api/internal/draw"
+	"github.com/muslimalfatih/tourney-api/internal/email"
 	"github.com/muslimalfatih/tourney-api/internal/event"
 	"github.com/muslimalfatih/tourney-api/internal/match"
 	"github.com/muslimalfatih/tourney-api/internal/participant"
@@ -25,6 +26,7 @@ import (
 	"github.com/muslimalfatih/tourney-api/internal/server"
 	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 	"github.com/muslimalfatih/tourney-api/internal/storage/postgres"
+	"github.com/muslimalfatih/tourney-api/internal/testhooks"
 	"github.com/muslimalfatih/tourney-api/internal/tournament"
 )
 
@@ -57,12 +59,51 @@ func run() error {
 
 	// --- Construct modules (explicit wiring, no DI container) ---
 
+	auditService := audit.NewService(pool)
 	tokens := auth.NewTokenService(cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
-	authHandler := auth.NewHandler(auth.NewService(auth.NewRepository(pool), tokens))
+	sessions := auth.NewSessionRepository(pool)
+	userRepo := auth.NewRepository(pool)
+	// The verifier is what every authenticated route consults: it checks the
+	// JWT and then that its session is still alive.
+	verifier := auth.NewSessionVerifier(tokens, sessions, userRepo)
+	authService := auth.NewService(userRepo, tokens, sessions, cfg.PasswordLoginEnabled)
+
+	// Real deliveries only when the config allows them; otherwise the fake
+	// sender, so a misconfigured environment cannot email anybody.
+	//
+	// E2E_TEST_MODE forces the fake sender UNCONDITIONALLY, even if a real
+	// PLUNK_API_KEY is sitting in the environment -- an automated browser run
+	// must never be one stray env var away from emailing a real address, and
+	// fakeSenderForHooks is what testhooks.Register reads codes back from
+	// below, so the two concerns share one sender by construction rather than
+	// by remembering to keep two switches in sync.
+	var sender email.Sender
+	var fakeSenderForHooks *email.FakeSender
+	if cfg.E2ETestMode {
+		fakeSenderForHooks = email.NewFakeSender()
+		sender = fakeSenderForHooks
+	} else if plunk, perr := email.NewPlunkSender(
+		cfg.PlunkAPIKey, cfg.PlunkFromEmail, cfg.PlunkFromName, cfg.PlunkSendURL,
+		cfg.IsProduction(), cfg.PlunkAllowRealSend,
+	); perr == nil {
+		sender = plunk
+	} else {
+		log.Warn("email sender is inert; codes will not be delivered", slog.String("reason", perr.Error()))
+		sender = email.NewFakeSender()
+	}
+
+	otpService := auth.NewOTPService(
+		userRepo,
+		auth.NewInvitationRepository(pool),
+		auth.NewOTPRepository(pool, cfg.OTPPepper),
+		sessions, tokens, auth.NewLimiter(), sender,
+		auditService, log,
+	)
+	authHandler := auth.NewHandler(authService, otpService, auditService, verifier)
 
 	hub := realtime.NewHub()
 
-	auditHandler := audit.NewHandler(audit.NewService(pool))
+	auditHandler := audit.NewHandler(auditService)
 
 	drawService := draw.NewService(pool)
 	tournamentService := tournament.NewService(pool)
@@ -73,7 +114,24 @@ func run() error {
 	participantHandler := participant.NewHandler(participant.NewService(pool))
 	matchHandler := match.NewHandler(match.NewService(pool), hub)
 	scheduleHandler := schedule.NewHandler(schedule.NewService(pool), hub)
-	platformHandler := platform.NewHandler(platform.NewService(pool))
+	platformService := platform.NewService(platform.Deps{
+		Pool: pool, Audit: auditService, Sessions: sessions,
+		Invitations: auth.NewInvitationRepository(pool), Auth: authService,
+	})
+	platformHandler := platform.NewHandler(platform.HandlerDeps{
+		Service: platformService, Auth: authService, OTP: otpService, Sender: sender,
+		// Only booleans and display strings cross into the settings page — the
+		// secret itself never leaves config.
+		Settings: platform.SettingsSource{
+			DefaultTimezone: "Asia/Makassar",
+			PlunkConfigured: cfg.PlunkAPIKey != "" && cfg.PlunkFromEmail != "",
+			PlunkFromEmail:  cfg.PlunkFromEmail,
+			PlunkFromName:   cfg.PlunkFromName,
+			PasswordLoginOn: cfg.PasswordLoginEnabled,
+			RealSendAllowed: cfg.IsProduction() || cfg.PlunkAllowRealSend,
+			Environment:     cfg.Env,
+		},
+	})
 
 	// --- Wire routes via the server's registrar hooks ---
 
@@ -81,7 +139,7 @@ func run() error {
 		Config:   cfg,
 		Log:      log,
 		Pool:     pool,
-		Verifier: tokens,
+		Verifier: verifier,
 
 		RegisterAuthRoutes: func(rg *gin.RouterGroup, v middleware.TokenVerifier) {
 			authHandler.Register(rg, v)
@@ -108,6 +166,12 @@ func run() error {
 	}
 
 	engine := server.New(deps)
+
+	if fakeSenderForHooks != nil {
+		testhooks.Register(engine, fakeSenderForHooks)
+		log.Warn("E2E_TEST_MODE is on: /internal/test/last-otp is mounted and all email is faked")
+	}
+
 	return server.Run(ctx, engine, cfg.Port, log)
 }
 

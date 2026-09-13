@@ -98,7 +98,10 @@ func upsertSuperAdmin(ctx context.Context, pool *pgxpool.Pool, email, password, 
 	}
 	if exists {
 		slog.Info("super admin already exists", slog.String("email", email))
-		return nil
+		// Still repaired: an environment seeded before Phase 5 has the user
+		// row but never got an invitation, and would otherwise stay locked out
+		// the moment AUTH_PASSWORD_LOGIN_ENABLED flips to false.
+		return acceptedInvitation(ctx, pool, email, "super_admin", nil)
 	}
 	hash, err := auth.HashPassword(password)
 	if err != nil {
@@ -109,7 +112,33 @@ func upsertSuperAdmin(ctx context.Context, pool *pgxpool.Pool, email, password, 
 		VALUES ($1, $2, $3, 'super_admin', NULL)`, email, hash, name); err != nil {
 		return fmt.Errorf("insert super admin: %w", err)
 	}
+	if err := acceptedInvitation(ctx, pool, email, "super_admin", nil); err != nil {
+		return err
+	}
 	slog.Info("super admin created", slog.String("email", email))
+	return nil
+}
+
+// acceptedInvitation gives a directly-inserted seed user a matching accepted
+// invitation row, mirroring 00018_bootstrap_super_admin.sql's own INSERT.
+//
+// Since Phase 5, OTPService.Request refuses anyone with no active invitation
+// -- and seeding a user by direct SQL insert, as this command always has,
+// creates no such row. Password login being the default made that invisible;
+// with AUTH_PASSWORD_LOGIN_ENABLED=false (the default since 5.2) a seeded
+// account could never sign in at all, on any environment that ever runs
+// `make seed`. This closes that gap at its source rather than only for the
+// e2e suite that happened to surface it.
+func acceptedInvitation(ctx context.Context, pool *pgxpool.Pool, email, role string, orgID *string) error {
+	_, err := pool.Exec(ctx, `
+		INSERT INTO invitations (email, email_display, role, organization_id, status, accepted_at)
+		VALUES (lower($1), $1, $2::user_role, $3, 'accepted', now())
+		ON CONFLICT (email) WHERE status <> 'revoked'
+		DO UPDATE SET status = 'accepted', accepted_at = coalesce(invitations.accepted_at, now())`,
+		email, role, orgID)
+	if err != nil {
+		return fmt.Errorf("accepted invitation for %s: %w", email, err)
+	}
 	return nil
 }
 
@@ -135,7 +164,7 @@ func upsertOrganizer(ctx context.Context, pool *pgxpool.Pool, orgName, orgSlug, 
 	}
 	if exists {
 		slog.Info("organizer already exists", slog.String("email", email))
-		return nil
+		return acceptedInvitation(ctx, pool, email, "organizer", &orgID)
 	}
 	hash, err := auth.HashPassword(password)
 	if err != nil {
@@ -145,6 +174,9 @@ func upsertOrganizer(ctx context.Context, pool *pgxpool.Pool, orgName, orgSlug, 
 		INSERT INTO users (email, password_hash, name, role, org_id)
 		VALUES ($1, $2, $3, 'organizer', $4)`, email, hash, name, orgID); err != nil {
 		return fmt.Errorf("insert organizer: %w", err)
+	}
+	if err := acceptedInvitation(ctx, pool, email, "organizer", &orgID); err != nil {
+		return err
 	}
 	slog.Info("organizer created", slog.String("email", email), slog.String("org", orgSlug))
 	return nil

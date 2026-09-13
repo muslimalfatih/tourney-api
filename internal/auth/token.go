@@ -10,9 +10,9 @@ import (
 	"github.com/muslimalfatih/tourney-api/internal/server/middleware"
 )
 
-// TokenService issues and verifies JWT access and refresh tokens. Access tokens
-// are short-lived and carry the caller's identity; refresh tokens are long-lived
-// and carry only the subject, used to mint a new access token.
+// TokenService issues and verifies JWT access tokens. Refresh tokens are NOT
+// JWTs since 00013 — they are opaque random values stored hashed against an
+// auth_sessions row (see session.go), so they can be revoked and rotated.
 type TokenService struct {
 	secret     []byte
 	accessTTL  time.Duration
@@ -31,11 +31,18 @@ func NewTokenService(secret string, accessTTL, refreshTTL time.Duration) *TokenS
 type accessClaims struct {
 	Role  string  `json:"role"`
 	OrgID *string `json:"org_id,omitempty"`
+	// SID names the auth_sessions row this token belongs to. Without it a
+	// token cannot be tied to a revocable session, so it is required.
+	SID string `json:"sid"`
 	jwt.RegisteredClaims
 }
 
+// RefreshTTL is how long a new session stays valid before it must be
+// re-established by signing in again.
+func (s *TokenService) RefreshTTL() time.Duration { return s.refreshTTL }
+
 // IssueAccess mints a signed access token for a user.
-func (s *TokenService) IssueAccess(userID uuid.UUID, role string, orgID *uuid.UUID) (string, error) {
+func (s *TokenService) IssueAccess(userID uuid.UUID, role string, orgID *uuid.UUID, sessionID uuid.UUID) (string, error) {
 	var org *string
 	if orgID != nil {
 		v := orgID.String()
@@ -45,6 +52,7 @@ func (s *TokenService) IssueAccess(userID uuid.UUID, role string, orgID *uuid.UU
 	claims := accessClaims{
 		Role:  role,
 		OrgID: org,
+		SID:   sessionID.String(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -54,18 +62,9 @@ func (s *TokenService) IssueAccess(userID uuid.UUID, role string, orgID *uuid.UU
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.secret)
 }
 
-// IssueRefresh mints a signed refresh token carrying only the subject.
-func (s *TokenService) IssueRefresh(userID uuid.UUID) (string, error) {
-	now := time.Now()
-	claims := jwt.RegisteredClaims{
-		Subject:   userID.String(),
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(s.refreshTTL)),
-	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.secret)
-}
-
-// VerifyAccessToken implements middleware.TokenVerifier.
+// VerifyAccessToken parses and checks the JWT ONLY. It deliberately does not
+// touch the database: auth.SessionVerifier layers the session lookup on top,
+// which keeps this unit pure and fast to test.
 func (s *TokenService) VerifyAccessToken(raw string) (*middleware.Claims, error) {
 	var claims accessClaims
 	if err := s.parse(raw, &claims); err != nil {
@@ -76,6 +75,13 @@ func (s *TokenService) VerifyAccessToken(raw string) (*middleware.Claims, error)
 		return nil, fmt.Errorf("invalid subject: %w", err)
 	}
 	out := &middleware.Claims{UserID: userID, Role: claims.Role}
+	if claims.SID != "" {
+		sid, err := uuid.Parse(claims.SID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid sid: %w", err)
+		}
+		out.SessionID = sid
+	}
 	if claims.OrgID != nil {
 		orgID, err := uuid.Parse(*claims.OrgID)
 		if err != nil {
@@ -84,15 +90,6 @@ func (s *TokenService) VerifyAccessToken(raw string) (*middleware.Claims, error)
 		out.OrgID = &orgID
 	}
 	return out, nil
-}
-
-// VerifyRefreshToken validates a refresh token and returns its subject.
-func (s *TokenService) VerifyRefreshToken(raw string) (uuid.UUID, error) {
-	var claims jwt.RegisteredClaims
-	if err := s.parse(raw, &claims); err != nil {
-		return uuid.Nil, err
-	}
-	return uuid.Parse(claims.Subject)
 }
 
 func (s *TokenService) parse(raw string, claims jwt.Claims) error {

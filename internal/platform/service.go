@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 
@@ -22,17 +23,35 @@ type CreateOrgRequest struct {
 }
 
 type SuspendRequest struct {
+	Reason string `json:"reason"`
 	// action: suspend | archive | restore
-	Action string `json:"action" binding:"required,oneof=suspend archive restore"`
+	Action string `json:"action" binding:"required,oneof=publish unpublish suspend archive restore"`
 }
 
 type Service struct {
-	repo  *Repository
-	audit *audit.Service
+	pool        *pgxpool.Pool
+	repo        *Repository
+	audit       *audit.Service
+	sessions    *auth.SessionRepository
+	invitations *auth.InvitationRepository
+	authSvc     *auth.Service
 }
 
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{repo: NewRepository(pool), audit: audit.NewService(pool)}
+// Deps is everything the platform surface needs from the auth domain. Wired
+// explicitly in main.go like every other module.
+type Deps struct {
+	Pool        *pgxpool.Pool
+	Audit       *audit.Service
+	Sessions    *auth.SessionRepository
+	Invitations *auth.InvitationRepository
+	Auth        *auth.Service
+}
+
+func NewService(d Deps) *Service {
+	return &Service{
+		pool: d.Pool, repo: NewRepository(d.Pool), audit: d.Audit,
+		sessions: d.Sessions, invitations: d.Invitations, authSvc: d.Auth,
+	}
 }
 
 func (s *Service) ListOrgs(ctx context.Context, limit, offset int) ([]Organization, int64, error) {
@@ -65,29 +84,58 @@ func (s *Service) ListAllTournaments(ctx context.Context, limit, offset int) ([]
 	return s.repo.ListAllTournaments(ctx, limit, offset)
 }
 
-// SetTournamentStatus maps an oversight action to a status transition and
-// records it in the audit log.
-func (s *Service) SetTournamentStatus(ctx context.Context, actor uuid.UUID, id uuid.UUID, action string) (*GlobalTournament, error) {
-	var status string
+// Force-action audit names, per the platform spec. "suspend" keeps its
+// original name for continuity with rows already written.
+const (
+	ActionTournamentForcePublished   = "admin.tournament_force_published"
+	ActionTournamentForceUnpublished = "admin.tournament_force_unpublished"
+	ActionTournamentArchived         = "admin.tournament_archived"
+	ActionTournamentRestored         = "admin.tournament_restored"
+	ActionTournamentSuspended        = "tournament.suspend"
+)
+
+// ErrReasonRequired: a force action without a stated reason is a force action
+// nobody can later explain.
+var ErrReasonRequired = errors.New("a reason is required for this action")
+
+// SetTournamentStatus applies a platform oversight action.
+//
+// publish / unpublish / archive / restore / suspend all route through the
+// tournament's status column, which is the same gate the public read path,
+// the OG-metadata injector and the SSE stream check — so a force unpublish
+// closes all three at once with no further work. A test proves it.
+func (s *Service) SetTournamentStatus(ctx context.Context, by Attribution, id uuid.UUID, action string, reason *string) (*GlobalTournament, error) {
+	if reason == nil || strings.TrimSpace(*reason) == "" {
+		return nil, ErrReasonRequired
+	}
+	var status, auditAction string
 	switch action {
-	case "suspend":
-		status = "suspended"
+	case "publish":
+		status, auditAction = "published", ActionTournamentForcePublished
+	case "unpublish":
+		status, auditAction = "draft", ActionTournamentForceUnpublished
 	case "archive":
-		status = "archived"
+		status, auditAction = "archived", ActionTournamentArchived
 	case "restore":
-		status = "draft"
+		status, auditAction = "draft", ActionTournamentRestored
+	case "suspend":
+		status, auditAction = "suspended", ActionTournamentSuspended
 	default:
-		status = "draft"
+		return nil, errors.New("unknown action")
+	}
+	before, err := s.repo.GetTournamentStatus(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	t, err := s.repo.SetTournamentStatus(ctx, id, status)
 	if err != nil {
 		return nil, err
 	}
-	_ = s.audit.Record(ctx, audit.Entry{
-		ActorUserID: actor, OrgID: &t.OrgID, TournamentID: &t.ID,
-		Action: "tournament." + action, TargetType: "tournament", TargetID: t.ID.String(),
-		Diff: map[string]any{"status": t.Status},
-	})
+	_ = s.audit.Record(ctx, by.entry(audit.Entry{
+		OrgID: &t.OrgID, TournamentID: &t.ID, Reason: reason,
+		Action: auditAction, TargetType: "tournament", TargetID: t.ID.String(),
+		Diff: map[string]any{"status": map[string]string{"from": before, "to": t.Status}},
+	}))
 	return t, nil
 }
 

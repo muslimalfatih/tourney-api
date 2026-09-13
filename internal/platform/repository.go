@@ -137,6 +137,16 @@ func (r *Repository) ListAllTournaments(ctx context.Context, limit, offset int) 
 }
 
 // SetTournamentStatus lets a super admin suspend/archive/restore any tournament.
+// GetTournamentStatus reads the current status, for the before/after diff.
+func (r *Repository) GetTournamentStatus(ctx context.Context, id uuid.UUID) (string, error) {
+	var status string
+	err := r.pool.QueryRow(ctx, `SELECT status::text FROM tournaments WHERE id = $1`, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return status, err
+}
+
 func (r *Repository) SetTournamentStatus(ctx context.Context, id uuid.UUID, status string) (*GlobalTournament, error) {
 	const q = `
 		UPDATE tournaments t SET status = $2::tournament_status

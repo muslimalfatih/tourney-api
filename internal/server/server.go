@@ -105,7 +105,7 @@ func registerAPIv1(r *gin.Engine, deps Deps) {
 	admin := v1.Group("")
 	admin.Use(
 		middleware.Auth(deps.Verifier),
-		middleware.RequireRole(middleware.RoleSuperAdmin),
+		middleware.RequireSuperAdmin(),
 	)
 	if deps.RegisterAdminRoutes != nil {
 		deps.RegisterAdminRoutes(admin)
