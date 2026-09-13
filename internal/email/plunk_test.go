@@ -1,9 +1,43 @@
 package email
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// Assertions catch a template that broke; they cannot tell you it looks wrong.
+// This writes the rendered markup somewhere a browser can open it, so a change
+// to these templates can be looked at before it reaches an inbox:
+//
+//	MAIL_PREVIEW_DIR=/tmp/mail go test ./internal/email/ -run Preview
+//
+// Off unless the variable is set, so an ordinary test run writes nothing.
+func TestWritePreview(t *testing.T) {
+	dir := os.Getenv("MAIL_PREVIEW_DIR")
+	if dir == "" {
+		t.Skip("set MAIL_PREVIEW_DIR to render the templates to disk")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"otp":        otpBody("804710"),
+		"invitation": invitationBody("a-very-long-organizer-address@somelongdomain.example", "super_admin"),
+	} {
+		path := filepath.Join(dir, name+".html")
+		// The outer background is neither white nor the card's own colour: it
+		// stands in for a mail client's chrome, so the frame's edges stay
+		// visible instead of blending into the page and looking edge-to-edge.
+		doc := `<!doctype html><meta charset="utf-8"><title>` + name +
+			`</title><body style="margin:0;background:#3a3a3a">` + shell(body)
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s", path)
+	}
+}
 
 // The bodies are the only part of this package a stranger ever reads, and they
 // are assembled by string concatenation, so the things worth pinning are the
