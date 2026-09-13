@@ -13,12 +13,18 @@ import (
 
 // DefaultPlunkSendURL is Plunk's transactional endpoint.
 //
-// Plunk's own docs currently show BOTH api.useplunk.com and
-// next-api.useplunk.com depending on which page you land on, and the reference
-// pages 404. Rather than bake in a guess that fails silently at the worst
-// moment, the base URL is overridable with PLUNK_API_URL. Confirm the right one
-// against your own dashboard before the first real send.
-const DefaultPlunkSendURL = "https://api.useplunk.com/v1/send"
+// Plunk's own docs show BOTH api.useplunk.com and next-api.useplunk.com
+// depending on which page you land on. This used to default to the former,
+// which cost a live incident: a valid key posted there comes back
+//
+//	401 {"error":"Unauthorized","message":"Incorrect Bearer token specified"}
+//
+// while the identical request to next-api succeeds. The failure reads exactly
+// like a bad key, so the first instinct is to go rotate a key that was fine
+// all along. Verified by hand against both hosts on 2026-09-13.
+//
+// Still overridable with PLUNK_API_URL, since only Plunk knows when this moves.
+const DefaultPlunkSendURL = "https://next-api.useplunk.com/v1/send"
 
 // PlunkSender delivers through Plunk's transactional API.
 //
@@ -115,7 +121,18 @@ func (p *PlunkSender) send(ctx context.Context, to, subject, body string) error 
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("email delivery failed with status %d", res.StatusCode)
+		return &DeliveryError{Status: res.StatusCode}
 	}
 	return nil
+}
+
+// DeliveryError reports that the provider rejected a send, carrying ONLY the
+// HTTP status. That is the one detail an operator needs and the one detail
+// that cannot leak anything: the response body may echo the recipient or the
+// key, so it is never captured. Callers can log Status without having to
+// decide, at the log site, whether the text they were handed is safe.
+type DeliveryError struct{ Status int }
+
+func (e *DeliveryError) Error() string {
+	return fmt.Sprintf("email delivery failed with status %d", e.Status)
 }

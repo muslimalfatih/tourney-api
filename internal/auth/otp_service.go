@@ -131,7 +131,18 @@ func (s *OTPService) Request(ctx context.Context, p RequestParams) error {
 	if err := s.sender.SendOTP(ctx, addr, code); err != nil {
 		// The provider's own message never leaves this line: it can carry the
 		// recipient list, and on some providers the API key itself.
-		s.log.ErrorContext(ctx, "otp delivery failed", slog.String("challenge_id", ch.ID.String()))
+		//
+		// The HTTP status is different — it leaks nothing and is the single
+		// most useful thing here. Dropping it too (as this once did) meant a
+		// real outage logged only "otp delivery failed", giving no way to tell
+		// a rejected key from a wrong endpoint from a provider outage without
+		// reproducing the call by hand against production.
+		attrs := []any{slog.String("challenge_id", ch.ID.String())}
+		var de *email.DeliveryError
+		if errors.As(err, &de) {
+			attrs = append(attrs, slog.Int("provider_status", de.Status))
+		}
+		s.log.ErrorContext(ctx, "otp delivery failed", attrs...)
 		return ErrDeliveryFailed
 	}
 
